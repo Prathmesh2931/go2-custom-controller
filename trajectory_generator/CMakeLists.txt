@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(leg_kinematics)
+project(trajectory_generator)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -8,12 +8,10 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(std_msgs REQUIRED) 
-find_package(sensor_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
-# uncomment the following section in order to fill in
-# further dependencies manually.
-# find_package(<dependency> REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -26,26 +24,29 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+add_executable(foot_trajectory_gen src/foot_trajectory_gen.cpp)
+ament_target_dependencies(foot_trajectory_gen rclcpp trajectory_msgs sensor_msgs)
 
-add_executable(foot_estimation src/fk_node.cpp)
-ament_target_dependencies(foot_estimation rclcpp trajectory_msgs sensor_msgs)
+add_executable(phase_generator src/phase_gen.cpp)
+ament_target_dependencies(phase_generator rclcpp trajectory_msgs sensor_msgs)
 
-add_executable(ik_node src/ik_node.cpp)
-ament_target_dependencies(ik_node rclcpp  ) 
+add_executable(cmd_control_go2 src/cmd_control_go2.cpp)
+ament_target_dependencies(cmd_control_go2 rclcpp trajectory_msgs sensor_msgs geometry_msgs)
 
-add_executable(fk_ik_node src/fk_ik_node.cpp)
-ament_target_dependencies(fk_ik_node rclcpp trajectory_msgs sensor_msgs)
-
-install(TARGETS
-  foot_estimation
-  ik_node
-  fk_ik_node
-  DESTINATION lib/${PROJECT_NAME}
-)
+add_executable(velocity_estimator src/velocity_estimator.cpp)
+ament_target_dependencies(velocity_estimator rclcpp trajectory_msgs sensor_msgs geometry_msgs nav_msgs)
 
 install(
   DIRECTORY include/ src/
   DESTINATION share/${PROJECT_NAME}
+)
+
+install(TARGETS
+  foot_trajectory_gen
+  phase_generator
+  cmd_control_go2
+  velocity_estimator
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 ament_package()

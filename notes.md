@@ -465,3 +465,21 @@
         - The foot moves further out to the side (Y increases).
         - The foot physically lifts closer to the belly of the robot ($Z$ shrinks).
         Because the hip_lateral spacer is part of that cardboard sheet, it doesn't just stay a flat 0.0955 anymore. Its contribution to $Y$ and $Z$ changes based on the angle $\theta$. That is why we use a standard 2D rotation matrix:$$\begin{bmatrix} y_{full} \\ z_{full} \end{bmatrix} = \begin{bmatrix} \cos(q_0) & \sin(q_0) \\ -\sin(q_0) & \cos(q_0) \end{bmatrix} \begin{bmatrix} \text{hip\_lateral} \\ z_{2d} \end{bmatrix}$$
+
+21. how to test out trajectory which is been geneartyed for single leg gazebo is showing weired behaviour it is always falling as champ is been disable is there so is there any way to test atleast my trajectory is correct or not 
+
+22. IN below traj geneartion mainly circle when bot get stablize and then i try to movement of lf then go2 was tilting on that side due to gravity and overll COM shift due to uplift in lf leg and when i try to diagonally control leg for circle then also it's getting imbalance weiredd behaviour why these can be due to : Move LF + RR while
+                        Body moves forward
+                        COM shifts
+                        Ground forces redistribute      
+
+23. Currently dealing with constraint while lifting 1 leg then momentun  is not maintain and controls are not perfect continous while lead to falling before these there must be preparation phase where actually if LF lef is lifting then RF and RH leg should bend down to maintain perfect motion of robot and maintain safety so these is it 
+2(diagonal) : here COM is still maintain but jerky and eventually breaking down of system and adaption to any kind of these movement should be well tackled out 
+
+24. Dynamic Control of legged robot(ETH zurich):
+        First, we train a teacher policy that has access to privileged information, namely ground-truth knowledge of the terrain and the robot’s contact with it. The privileged information enables the policy to quickly achieve high performance.We then use this privileged teacher to guide the learning of a purely proprioceptive student controller that only uses sensors that are available on the real robot. This privileged learning protocol is enabled by simulation, but the resulting proprioceptive policy is not confined to simulation and is deployed on physical machines.
+        based on the controller’s performance at different stagesof the training process. In essence, terrains are synthesized such that the controller is capable of traversing them while becoming more robust. We evaluate the traversability of parameterized terrains anduse particle filtering to maintain a distribution of terrain parameters of medium difficulty [24, 25] that adapt as the neural network learns. Thetraining conditions grow increasingly more challenging, yielding and omnidirectional controller that combines agility with unprecedented resilience.
+        ![alt text](image.png)
+
+25. 0.5 - 0.5*cos(π*t). This gives slow foot lift at the start, fast travel in the middle, and soft touchdown at the end. 
+
