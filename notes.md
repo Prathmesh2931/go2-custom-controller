@@ -483,3 +483,4 @@
 
 25. 0.5 - 0.5*cos(π*t). This gives slow foot lift at the start, fast travel in the middle, and soft touchdown at the end. 
 
+26. standard Ros pkg fail for localization A standard YAML-configured EKF doesn't know what a leg is. It doesn't read joint encoders, compute forward kinematics (FK), or track which leg is supporting the body's weight. To make state estimation work for your Go2, you have to write a custom Legged EKF node in C++ that treats leg contact states as explicit mathematical conditions.
