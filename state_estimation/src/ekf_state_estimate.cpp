@@ -26,7 +26,7 @@ public:
 
         timer_ = this->create_wall_timer(std::chrono::milliseconds(20), std::bind(&StateEstimate::tick, this));
         initialize_ekf();
-        RCLCPP_INFO(get_logger(), "Probabilistic Terrain EKF Estimator Initialized.");
+        RCLCPP_INFO(get_logger(), "Production 18-State Position EKF Initialized.");
     }
 
 private:
@@ -37,7 +37,7 @@ private:
     static constexpr double LEG_Y_DIST = 0.0465; 
     static constexpr double STANCE_Z   = -0.28;
 
-    static constexpr int STATE_SIZE = 21;
+    static constexpr int STATE_SIZE = 18;
     static constexpr int MEAS_SIZE = 3;
 
     Eigen::Matrix<double, STATE_SIZE, 1> x_;
@@ -47,7 +47,6 @@ private:
     std::unordered_map<std::string, double> js_;
     Eigen::Matrix3d R_body_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d imu_accel_ = Eigen::Vector3d::Zero();
-    Eigen::Vector3d imu_gyro_ = Eigen::Vector3d::Zero();
 
     bool ready_ = false;
     rclcpp::Time last_time_;
@@ -60,16 +59,14 @@ private:
     void initialize_ekf()
     {
         x_.setZero(); P_.setZero(); Q_.setZero();
-        x_(5) = 0.28; 
+        x_(2) = 0.28; 
         P_.diagonal().segment<3>(0).setConstant(0.001); 
         P_.diagonal().segment<3>(3).setConstant(0.01);  
-        P_.diagonal().segment<3>(6).setConstant(0.001); 
-        P_.diagonal().segment<12>(9).setConstant(0.01); 
+        P_.diagonal().segment<12>(6).setConstant(0.01); 
 
         Q_.diagonal().segment<3>(0).setConstant(0.001); 
-        Q_.diagonal().segment<3>(3).setConstant(1.2);   // Balanced process noise configuration
-        Q_.diagonal().segment<3>(6).setConstant(0.002); 
-        Q_.diagonal().segment<12>(9).setConstant(0.05); 
+        Q_.diagonal().segment<3>(3).setConstant(1.2);   
+        Q_.diagonal().segment<12>(6).setConstant(0.05); 
     }
 
     Eigen::Vector3d forward_kinematics(double q_hip, double q_thigh, double q_calf, int leg_index)
@@ -115,11 +112,22 @@ private:
     {
         if (!ready_) return;
 
-        if (std::isnan(x_(3)) || std::abs(x_(3)) > 50.0 || P_(3,3) > 1e5) {
-            RCLCPP_WARN(this->get_logger(), "EKF Instability Guard Triggered. Resetting covariance space.");
-            initialize_ekf(); // Safely snaps the matrices back to baseline parameters
+        // FIX: Calculated and declared ahead of the inspection gates so it passes compile variables smoothly
+        Eigen::Vector3d gravity(0.0, 0.0, 9.81);
+        Eigen::Vector3d accel_world = R_body_ * imu_accel_ - gravity;
+
+        // ── DIAGNOSTIC INSPECTOR: Expose the exact cause of the reset loop ──
+        if (std::isnan(x_(0)) || std::abs(x_(0)) > 100.0 || std::abs(x_(2)) > 10.0 || P_(0,0) > 1e5) {
+            RCLCPP_WARN(this->get_logger(), "=== EKF RESET TRIGGER DIAGNOSTICS ===");
+            RCLCPP_WARN(this->get_logger(), "Body Position X: %f, Z: %f", x_(0), x_(2));
+            RCLCPP_WARN(this->get_logger(), "Body Velocity X: %f, Z: %f", x_(3), x_(5));
+            RCLCPP_WARN(this->get_logger(), "Position Covariance P(0,0): %f", P_(0,0));
+            RCLCPP_WARN(this->get_logger(), "World Accel Z-Axis: %f", accel_world.z());
+            RCLCPP_WARN(this->get_logger(), "======================================");
+
+            initialize_ekf(); 
             first_tick_ = true;
-        return;
+            return;
         }
         std::string leg_prefix[4] = {"lf_", "rf_", "lh_", "rh_"};
         
@@ -131,7 +139,7 @@ private:
                 std::string calf_str = leg_prefix[i] + "lower_leg_joint";
                 if (js_.find(hip_str) != js_.end()) {
                     Eigen::Vector3d r_foot_body = forward_kinematics(js_[hip_str], js_[thigh_str], js_[calf_str], i);
-                    x_.segment<3>(9 + i * 3) = x_.segment<3>(0) + R_body_ * r_foot_body;
+                    x_.segment<3>(6 + i * 3) = x_.segment<3>(0) + R_body_ * r_foot_body;
                     prev_r_foot_body_[i] = r_foot_body;
                 }
             }
@@ -143,16 +151,11 @@ private:
         last_time_ = current_time;
         if (dt <= 0.0 || dt > 0.1) dt = 0.02;
 
-        Eigen::Vector3d gravity(0.0, 0.0, 9.81);
-        Eigen::Vector3d accel_world = R_body_ * imu_accel_ - gravity;
         x_.segment<3>(0) += x_.segment<3>(3) * dt + 0.5 * accel_world * dt * dt; 
         x_.segment<3>(3) += accel_world * dt; 
 
         Eigen::Matrix<double, STATE_SIZE, STATE_SIZE> F = Eigen::Matrix<double, STATE_SIZE, STATE_SIZE>::Identity();
         F.block<3,3>(0,3) = Eigen::Matrix3d::Identity() * dt;
-        Eigen::Matrix3d acc_skew;
-        acc_skew << 0, -imu_accel_.z(), imu_accel_.y(), imu_accel_.z(), 0, -imu_accel_.x(), -imu_accel_.y(), imu_accel_.x(), 0;
-        F.block<3,3>(3,6) = -R_body_ * acc_skew * dt;
         P_.noalias() = F * P_ * F.transpose() + Q_;
 
         double latest_nis = 0.0;
@@ -168,48 +171,43 @@ private:
             Eigen::Vector3d relative_foot_velocity = (r_foot_body - prev_r_foot_body_[i]) / dt;
             prev_r_foot_body_[i] = r_foot_body; 
 
-            // ── VIRTUAL CONTACT PROBABILITY FUSION LAYER ──
             double phase_factor  = (active_contacts_[i] == 1) ? 1.0 : 0.0;
             double vel_factor    = std::exp(-std::pow(relative_foot_velocity.z(), 2) / (2.0 * 0.08 * 0.08));
             double height_factor = std::exp(-std::pow(r_foot_body.z() - STANCE_Z, 2) / (2.0 * 0.05 * 0.05));
             
-            // Unified probabilistic support scoring matrix
             double p_contact = (0.5 * phase_factor) + (0.3 * vel_factor) + (0.2 * height_factor);
-            p_contact = std::clamp(p_contact, 0.001, 1.0);
+            p_contact = std::clamp(p_contact, 0.01, 1.0);
 
-            int foot_state_offset = 9 + i*3;
-            bool is_stance = (p_contact > 0.4); // Determine baseline status transitions
+            int foot_state_offset = 6 + i*3;
+            bool is_stance = (p_contact > 0.35); 
 
             if (is_stance && !prev_stance_[i]) {
                 x_.segment<3>(foot_state_offset) = x_.segment<3>(0) + R_body_ * r_foot_body;
                 P_.block<3, STATE_SIZE>(foot_state_offset, 0).setZero();
                 P_.block<STATE_SIZE, 3>(0, foot_state_offset).setZero();
-                P_.block<3, 3>(foot_state_offset, foot_state_offset) = Eigen::Matrix3d::Identity() * 0.1;
+                P_.block<3, 3>(foot_state_offset, foot_state_offset) = Eigen::Matrix3d::Identity() * 0.05;
             }
             prev_stance_[i] = is_stance; 
 
             Eigen::Matrix<double, MEAS_SIZE, STATE_SIZE> H = Eigen::Matrix<double, MEAS_SIZE, STATE_SIZE>::Zero();
             H.block<3,3>(0,0) = -Eigen::Matrix3d::Identity();            
             H.block<3,3>(0,foot_state_offset) = Eigen::Matrix3d::Identity(); 
-            Eigen::Matrix3d r_skew;
-            r_skew << 0, -r_foot_body.z(), r_foot_body.y(), r_foot_body.z(), 0, -r_foot_body.x(), -r_foot_body.y(), r_foot_body.x(), 0;
-            H.block<3,3>(0,6) = R_body_ * r_skew; 
 
-            // Dynamic covariance variance scaling prevents gating lockout drops on sloped inclines
-            Eigen::Matrix3d R = Eigen::Matrix3d::Identity() * (0.005 / p_contact); 
-            Eigen::Vector3d y = x_.segment<3>(foot_state_offset) - x_.segment<3>(0) - R_body_ * r_foot_body; 
+            Eigen::Matrix3d R = Eigen::Matrix3d::Identity() * (0.002 / p_contact); 
+            Eigen::Vector3d y = -(x_.segment<3>(foot_state_offset)) - x_.segment<3>(0) + (R_body_ * r_foot_body); 
             Eigen::Matrix3d S = H * P_ * H.transpose() + R;
-            double mahalanobis = y.transpose() * S.inverse() * y;
             
-            if (is_stance) {
-                latest_nis = mahalanobis; latest_y = y;
-                if (mahalanobis > 25.0) continue; 
+            double mahalanobis = y.transpose() * S.inverse() * y;
+            if (is_stance && mahalanobis > 100.0) {
+                latest_nis = mahalanobis;
+                continue; 
             }
 
             Eigen::Matrix<double, STATE_SIZE, MEAS_SIZE> K = P_ * H.transpose() * S.inverse();
             x_.noalias() += K * y;
             Eigen::Matrix<double, STATE_SIZE, STATE_SIZE> I = Eigen::Matrix<double, STATE_SIZE, STATE_SIZE>::Identity();
             P_.noalias() = (I - K * H) * P_;
+            latest_nis = mahalanobis;
         }
 
         nav_msgs::msg::Odometry odom_msg;
@@ -221,7 +219,7 @@ private:
         pub_odom_->publish(odom_msg);
 
         std_msgs::msg::Float64MultiArray diag_msg;
-        diag_msg.data = {P_(3,3), P_(4,4), P_(5,5), latest_y(0), latest_y(1), latest_y(2), latest_nis};
+        diag_msg.data = {P_(0,0), P_(1,1), P_(2,2), x_(0), x_(1), x_(2), latest_nis};
         pub_diag_->publish(diag_msg);
     }
 

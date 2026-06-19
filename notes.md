@@ -484,3 +484,5 @@
 25. 0.5 - 0.5*cos(π*t). This gives slow foot lift at the start, fast travel in the middle, and soft touchdown at the end. 
 
 26. standard Ros pkg fail for localization A standard YAML-configured EKF doesn't know what a leg is. It doesn't read joint encoders, compute forward kinematics (FK), or track which leg is supporting the body's weight. To make state estimation work for your Go2, you have to write a custom Legged EKF node in C++ that treats leg contact states as explicit mathematical conditions.
+
+27. By shifting to Stance-Space Force Control (Virtual Model Control), we treat the leg as a configurable Cartesian spring suspended directly beneath the chassis. Instead of commanding arbitrary joint angles (q), we command a desired force vector (f) at the foot endpoint. This allows the leg links to behave as compliant, natural shock absorbers that handle uneven terrain effortlessly.

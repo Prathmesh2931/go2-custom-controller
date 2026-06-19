@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.8)
 project(trajectory_generator)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
+  add_compile_options(-Wall -Wextra -Wpedantic -O3)
 endif()
 
 # find dependencies
@@ -12,6 +12,8 @@ find_package(trajectory_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(eigen3_cmake_module REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -36,6 +38,14 @@ ament_target_dependencies(cmd_control_go2 rclcpp trajectory_msgs sensor_msgs geo
 add_executable(velocity_estimator src/velocity_estimator.cpp)
 ament_target_dependencies(velocity_estimator rclcpp trajectory_msgs sensor_msgs geometry_msgs nav_msgs)
 
+add_executable(jacobian_validator src/jacobian_validator.cpp)
+target_link_libraries(jacobian_validator Eigen3::Eigen)
+ament_target_dependencies(jacobian_validator rclcpp)
+
+add_executable(mpc_trajectory_gen src/mpc_trajectory_gen.cpp)
+target_link_libraries(mpc_trajectory_gen Eigen3::Eigen)
+ament_target_dependencies(mpc_trajectory_gen rclcpp trajectory_msgs sensor_msgs nav_msgs geometry_msgs)
+
 install(
   DIRECTORY include/ src/
   DESTINATION share/${PROJECT_NAME}
@@ -46,6 +56,8 @@ install(TARGETS
   phase_generator
   cmd_control_go2
   velocity_estimator
+  mpc_trajectory_gen
+  jacobian_validator
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -15,6 +15,10 @@
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
 
+  <build_depend>eigen3_cmake_module</build_depend>
+  <build_depend>eigen</build_depend>
+  <exec_depend>eigen</exec_depend>
+
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 
