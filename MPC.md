@@ -85,3 +85,41 @@ Stance Targets:
   q_stand_lower_leg: -1.30   # Rad (Calf link backward compression pitch)
 
 ```
+
+I am glad we finally got the Go2 standing perfectly!
+
+Since you are writing this up for your documentation (`.md` file), here is a clean, on-point summary of the 5 major roadblocks we hit, the underlying engineering physics behind them, and exactly how we solved them.
+
+You can copy and paste this directly into your notes:
+
+---
+
+Problem faced during the stand pose using effort controller 
+## 1. Instantaneous Flipping / Launching ("Initial Condition Explosion")
+
+* **The Symptom:** The moment the controller engaged, the robot violently kicked the floor and launched itself upside down in less than 2 seconds.
+* **The Root Cause:** The robot spawns crumpled on the floor. Applying a high-stiffness ($K_p$) target of `0.67` and `-1.30` instantly creates a massive mathematical error step. The PD loop reacted by commanding maximum torque in the first 4 milliseconds. This sudden, explosive impulse force against the Gazebo rigid ground plane caused a violent reaction.
+* **The Solution:** Implemented a **Smooth Trajectory Ramp**. By capturing the robot's resting position on tick 1 and interpolating to the final standing target over a 2.5-second ramp, the feet gently took the weight of the robot without triggering explosive ground reaction forces.
+
+## 2. The Left-Leg Splay / Splits ("Positive Feedback Loop")
+
+* **The Symptom:** The left legs (LF, LH) constantly drifted outward until the hip joints hit their physical hard-stops (`1.047` rad), causing the chassis to drop.
+* **The Root Cause:** A manual sign inversion (`tau *= -1.0`) was mistakenly applied to the left hips to account for mirroring. However, the URDF (`leg.xacro`) already accounted for the hardware mirroring. Inverting it *again* turned the PD loop into a positive feedback loop: as the leg drifted 1 degree out, the math commanded it to push 2 degrees further out.
+* **The Solution:** Removed all manual sign inversions. A pure PD loop `(Target - Actual)` is mathematically self-correcting and will always seek the target automatically when aligned with a properly mirrored URDF.
+
+## 3. Violent High-Frequency Shaking ("Derivative Chattering")
+
+* **The Symptom:** The legs trembled or "buzzed" rapidly while trying to stand, destroying stability. Logs showed torque violently oscillating between positive and negative extremes (+150 Nm to -100 Nm) at 250Hz.
+* **The Root Cause:** Gazebo calculates velocity numerically, which results in a highly jagged, noisy velocity signal. A high Damping gain ($K_d = 4.0$) multiplied this microscopic noise into massive, instantaneous torque spikes. (Attempts to fix this with an EMA Low-Pass Filter introduced *Phase Lag*, leading to Integral Windup and rocking).
+* **The Solution:** Dropped the Damping gain significantly ($K_d = 0.4$) so it wouldn't overreact to simulation noise. Added a **Velocity Deadband** (`if (abs(vel) < 0.05) vel = 0.0;`) to act as a noise-gate, silencing the microscopic Gazebo jitter completely.
+
+## 4. Resting on Calves ("Steady-State Sag & Torque Starvation")
+
+* **The Symptom:** The robot was stable and perfectly centered, but the back end was sagging, leaving the calf joints resting on the floor.
+* **The Root Cause (Part A):** The global torque limit was set to `23.7 Nm`. While correct for the hips and thighs, the Go2 Calves are geared differently and physically require up to `45.43 Nm` of torque. The back end simply didn't have the muscular power to lift the heavy battery.
+* **The Root Cause (Part B):** A low, stable stiffness ($K_p = 40.0$) acts like a "spongy" spring. To lift a 12kg robot, a spongy spring must physically compress (sag) to generate enough restoring force.
+* **The Solution:** Assigned dynamic, joint-specific clamping limits (`45.43 Nm` for calves). Implemented **Data-Driven Gravity Feedforward ($ff$)** derived directly from steady-state `RAW_TAU` logs. By having the Feedforward directly cancel out the weight of the robot (-2.0 Nm for thighs, +5.0 Nm for calves), the soft $K_p$ springs didn't have to compress at all, resulting in a tall, rigid, and completely motionless stand.
+
+---
+
+Let me know when you are ready to transition this butter-smooth base state over to the Convex MPC solver!

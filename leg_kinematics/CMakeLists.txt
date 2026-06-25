@@ -36,10 +36,14 @@ ament_target_dependencies(ik_node rclcpp  )
 add_executable(fk_ik_node src/fk_ik_node.cpp)
 ament_target_dependencies(fk_ik_node rclcpp trajectory_msgs sensor_msgs)
 
+add_executable(fk_validation src/fk_validation.cpp)
+ament_target_dependencies(fk_validation rclcpp sensor_msgs)
+
 install(TARGETS
   foot_estimation
   ik_node
   fk_ik_node
+  fk_validation
   DESTINATION lib/${PROJECT_NAME}
 )
 

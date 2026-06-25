@@ -46,6 +46,9 @@ add_executable(mpc_trajectory_gen src/mpc_trajectory_gen.cpp)
 target_link_libraries(mpc_trajectory_gen Eigen3::Eigen)
 ament_target_dependencies(mpc_trajectory_gen rclcpp trajectory_msgs sensor_msgs nav_msgs geometry_msgs)
 
+add_executable(trot_gait src/trot_gait.cpp)
+ament_target_dependencies(trot_gait rclcpp trajectory_msgs sensor_msgs geometry_msgs)
+
 install(
   DIRECTORY include/ src/
   DESTINATION share/${PROJECT_NAME}
@@ -56,6 +59,7 @@ install(TARGETS
   phase_generator
   cmd_control_go2
   velocity_estimator
+  trot_gait
   mpc_trajectory_gen
   jacobian_validator
   DESTINATION lib/${PROJECT_NAME}
