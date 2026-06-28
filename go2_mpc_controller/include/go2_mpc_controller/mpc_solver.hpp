@@ -12,14 +12,14 @@ public:
     using StateVector = Eigen::Matrix<double, 13, 1>;
     using ForceVector = Eigen::Matrix<double, 12, 1>;
 
-    ForceVector solve(const StateVector& current_state, const std::vector<Eigen::Vector3d>& foot_positions, double target_z);
+    ForceVector solve(const StateVector& current_state, const std::vector<Eigen::Vector3d>& foot_positions, double target_z,const  std::vector<int>& contact_state = {1, 1, 1, 1}); // Default: all feet in contact
 
 private:
     // MPC Prediction Parameters
     const int N = 10;            // Horizon length (Look 10 steps into the future)
     const double dt = 0.03;      // 30ms per step (Predicting 0.3 seconds ahead)
     const double mu = 0.5;       // Friction coefficient
-    const double f_max = 37.0;  // Maximum force per foot in Newtons
+    const double f_max = 120.0;  // Maximum force per foot in Newtons
 
     // Tuning Weights
     Eigen::Matrix<double, 13, 13> Q; 

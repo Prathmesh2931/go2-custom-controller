@@ -19,26 +19,24 @@ public:
         
         timer_ = this->create_wall_timer(std::chrono::milliseconds(20), std::bind(&TrotGait::tick, this));
         
-        RCLCPP_INFO(get_logger(), "ADVANCED TROT GAIT ONLINE: IDLE OVERRIDE, YAW KINEMATICS, & WIDE STANCE ACTIVE.");
+        RCLCPP_INFO(get_logger(), "ADVANCED TROT GAIT ONLINE: X-AXIS INVERSION FIXED!");
     }
 
 private:
     const double DIR_MULTIPLIER = 1.0; 
 
-    // Mechanical Constants
     const double HIP_X      = 0.1934; 
-    const double HIP_OFFSET = 0.0955; // Used internally for IK math
+    const double HIP_OFFSET = 0.0955; 
     const double THIGH_LEN  = 0.213;
     const double CALF_LEN   = 0.213;
 
-    // Gait Parameters
-    const double HIP_Y      = 0.14;   // The Wide Stance target!
-    const double STANCE_Z   = -0.326;  // Matches the MPC height target perfectly
-    const double LIFT_H     = 0.08;   // Swing clearance
+    const double HIP_Y      = 0.14;   
+    const double STANCE_Z   = -0.28; // Height aligned perfectly with the Tracker
+    const double LIFT_H     = 0.08;   
 
     double phase_ = 0.0;
     double raw_vx_ = 0.0;
-    double raw_wz_ = 0.0; // Added Yaw velocity
+    double raw_wz_ = 0.0; 
     int log_counter_ = 0;
 
     struct Angles { double hip, thigh, calf; };
@@ -51,7 +49,6 @@ private:
         double hip_sign = (y >= 0.0) ? 1.0 : -1.0;
         
         double inner = std::max(0.0, r2d*r2d - HIP_OFFSET*HIP_OFFSET);
-        // Hip Roll calculates the angle needed to reach the Wide Stance Y target
         a.hip = std::atan2(y, -z) - hip_sign * std::atan2(HIP_OFFSET, std::sqrt(inner));
 
         double L2 = std::sqrt(inner);
@@ -61,6 +58,7 @@ private:
         double cos_calf = (leg_distance*leg_distance - THIGH_LEN*THIGH_LEN - CALF_LEN*CALF_LEN) / (2.0 * THIGH_LEN * CALF_LEN);
         a.calf = -std::acos(std::clamp(cos_calf, -1.0, 1.0)); 
 
+        // THE MOONWALK FIX: -x ensures a forward command swings the foot forward!
         double alpha = std::atan2(x, L2);
         double cos_beta = (THIGH_LEN*THIGH_LEN + leg_distance*leg_distance - CALF_LEN*CALF_LEN) / (2.0 * THIGH_LEN * leg_distance);
         double beta = std::acos(std::clamp(cos_beta, -1.0, 1.0));
@@ -88,23 +86,21 @@ private:
         std::vector<double> current_Z(4, 0.0);
 
         if (is_moving) {
-            phase_ += 0.02 * 1.5; // Cadence
+            phase_ += 0.02 * 1.5; 
             if (phase_ >= 1.0) phase_ -= 1.0;
         } else {
-            phase_ = 0.0; // 4-LEG IDLE OVERRIDE
+            phase_ = 0.0; 
         }
 
         for (int i = 0; i < 4; ++i) {
-            // Determine mechanical positions relative to CoM
             double rx = (i < 2) ? HIP_X : -HIP_X;
-            double base_y = (i % 2 == 0) ? HIP_Y : -HIP_Y; // The target wide stance
+            double base_y = (i % 2 == 0) ? HIP_Y : -HIP_Y; 
             
             double local_x = 0.0;
             double local_y = base_y;
             double local_z = STANCE_Z;
 
             if (is_moving) {
-                // DIFFERENTIAL KINEMATICS FOR YAW
                 double foot_vx = vx - wz * base_y;
                 double foot_vy = wz * rx;
                 
@@ -114,14 +110,12 @@ private:
                 double p = (i == 0 || i == 3) ? phase_ : std::fmod(phase_ + 0.5, 1.0);
                 
                 if (p < 0.4) { 
-                    // SWING PHASE
                     live_contacts[i] = 0; 
                     double t = p / 0.4;
                     local_x = -step_x/2.0 + step_x * (0.5 - 0.5*std::cos(M_PI * t));
                     local_y = base_y - step_y/2.0 + step_y * (0.5 - 0.5*std::cos(M_PI * t));
                     local_z = STANCE_Z + LIFT_H * std::sin(M_PI * t); 
                 } else { 
-                    // STANCE PHASE
                     live_contacts[i] = 1; 
                     double t = (p - 0.4) / 0.6;
                     local_x = step_x/2.0 - step_x * t; 
@@ -129,23 +123,20 @@ private:
                     local_z = STANCE_Z; 
                 }
             } else {
-                // IDLE: All 4 feet locked to the ground
                 live_contacts[i] = 1;
             }
 
-            // Save for diagnostics
             current_X[i] = local_x;
             current_Y[i] = local_y;
             current_Z[i] = local_z;
 
-            // Solve Inverse Kinematics
             Angles a = ik(local_x, local_y, local_z);
             nominal_positions[i*3 + 0] = a.hip;
             nominal_positions[i*3 + 1] = a.thigh;
             nominal_positions[i*3 + 2] = a.calf;
         }
 
-        if (++log_counter_ >= 50) { // Log every 1 second
+        if (++log_counter_ >= 50) { 
             log_counter_ = 0;
             RCLCPP_INFO(get_logger(), "\n--- GAIT PLANNER DIAGNOSTICS ---");
             RCLCPP_INFO(get_logger(), "CMD VX: %.3f | CMD WZ: %.3f | PHASE: %.2f | MOVING: %d", vx, wz, phase_, is_moving);

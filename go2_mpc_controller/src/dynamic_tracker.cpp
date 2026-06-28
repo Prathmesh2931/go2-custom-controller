@@ -36,7 +36,6 @@ public:
             "/odom/ground_truth", 10,
             std::bind(&DynamicTracker::odom_callback, this, std::placeholders::_1), sub_opt);
 
-        // STEP 3 FIX: Subscribe to the Trot Gait Planner!
         sub_gait_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
             "/gait/planned_positions", 10,
             std::bind(&DynamicTracker::gait_callback, this, std::placeholders::_1), sub_opt);
@@ -56,18 +55,18 @@ public:
             "rh_hip_joint", "rh_upper_leg_joint", "rh_lower_leg_joint"
         };
 
-        solver_ = new MpcSolver();
+        void* mem = std::aligned_alloc(32, sizeof(MpcSolver));
+        solver_ = new (mem) MpcSolver();
         latest_f_optimal_std_.assign(12, 0.0);
 
         mpc_thread_ = std::thread(&DynamicTracker::mpc_thread_func, this);
 
-        RCLCPP_INFO(this->get_logger(), "STEP 3: DYNAMIC GAIT HANDOVER ACTIVE. LISTENING TO TROT PLANNER.");
+        RCLCPP_INFO(this->get_logger(), "FINAL STEP: ALL FILTERS DELETED. ZERO LATENCY SWING TRACKING.");
     }
 
     ~DynamicTracker() {
         shutdown_.store(true);
         if (mpc_thread_.joinable()) mpc_thread_.join();
-        delete solver_;
     }
 
 private:
@@ -80,7 +79,9 @@ private:
     
     std::mutex state_mutex_;
     double roll_ = 0.0, pitch_ = 0.0, yaw_ = 0.0;
-    double pos_z_ = 0.326;
+    
+    double pos_z_ = 0.28; 
+    
     double vx_ = 0.0, vy_ = 0.0, vz_ = 0.0;
     double wx_ = 0.0, wy_ = 0.0, wz_ = 0.0;
     std::vector<double> shared_pos_{12, 0.0};
@@ -91,10 +92,18 @@ private:
     std::vector<double> latest_f_optimal_std_;
     bool mpc_initialized_ = false;
 
-    // Gait Memory
     std::mutex gait_mutex_;
-    std::vector<double> dynamic_targets_{0.0, 0.67, -1.30, 0.0, 0.67, -1.30, 0.0, 0.67, -1.30, 0.0, 0.67, -1.30};
-    std::vector<int> current_contacts_{1, 1, 1, 1}; // Default all 4 on ground
+
+    double current_alpha_ = 0.0;
+    
+    // Default Stance targets matching 0.28m
+    std::vector<double> dynamic_targets_{
+         0.154, 0.796, -1.591, 
+        -0.154, 0.796, -1.591, 
+         0.154, 0.796, -1.591, 
+        -0.154, 0.796, -1.591
+    };
+    std::vector<int> current_contacts_{1, 1, 1, 1}; 
 
     std::thread mpc_thread_;
     std::atomic<bool> mpc_running_;
@@ -114,13 +123,14 @@ private:
     std::vector<double> start_pos_;
 
     void mpc_thread_func() {
+        int print_counter = 0;
         while (!shutdown_.load() && rclcpp::ok()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(33)); 
 
             if (!js_received_ || !odom_received_ || first_tick_) continue;
             
             double elapsed = (this->now() - start_time_).seconds();
-            if (elapsed < 3.5) continue;
+            if (elapsed < 1.0) continue; 
 
             double roll, pitch, yaw, pos_z, vx, vy, vz, wx, wy, wz;
             std::vector<double> pos(12, 0.0);
@@ -141,7 +151,33 @@ private:
                 foot_pos[i] = hip_off + go2_physics::calcFootPosition(pos[i*3], pos[i*3+1], pos[i*3+2], i);
             }
 
-            MpcSolver::ForceVector f = solver_->solve(state, foot_pos, 0.326);
+            std::vector<int> contacts_for_mpc(4, 1);
+            {
+                std::lock_guard<std::mutex> lock(gait_mutex_);
+                contacts_for_mpc = current_contacts_;
+            }
+
+            MpcSolver::ForceVector f = solver_->solve(state, foot_pos, 0.28, contacts_for_mpc);
+
+            if (++print_counter >= 30) {
+                print_counter = 0;
+                double total_fz = 0.0;
+                std::cout << "\n===== MPC FORCE OUTPUT =====\n";
+                for (int leg = 0; leg < 4; ++leg) {
+                    double fx = f(leg*3+0), fy = f(leg*3+1), fz = f(leg*3+2);
+                    total_fz += fz;
+                    std::cout << "LEG " << leg
+                            << "  Fx=" << std::setw(7) << std::fixed << std::setprecision(1) << fx
+                            << "  Fy=" << std::setw(7) << fy
+                            << "  Fz=" << std::setw(7) << fz
+                            << (fz < 0 ? "  <<< VIOLATION" : "")
+                            << "\n";
+                }
+                std::cout << "TOTAL Fz=" << total_fz << "  alpha=" << current_alpha_
+                        << (total_fz > 250 ? "  <<< TOO HIGH" : "")
+                        << (total_fz <  80 ? "  <<< TOO LOW"  : "")
+                        << "\n============================\n";
+            }
 
             {
                 std::lock_guard<std::mutex> lock(mpc_mutex_);
@@ -200,8 +236,6 @@ private:
         double elapsed = (this->now() - start_time_).seconds();
 
         if (first_tick_) {
-            if (elapsed < 0.5) return; 
-            
             start_pos_.resize(12, 0.0);
             for (int i = 0; i < 12; ++i) {
                 auto it = std::find(last_js_.name.begin(), last_js_.name.end(), joint_names_[i]);
@@ -229,7 +263,6 @@ private:
             shared_pos_ = current_pos;
         }
 
-        // Fetch the active gait data!
         std::vector<double> target_q(12, 0.0);
         std::vector<int> contacts(4, 1);
         {
@@ -238,25 +271,70 @@ private:
             contacts = current_contacts_;
         }
 
-        double ramp = std::clamp((elapsed - 0.5) / 2.5, 0.0, 1.0);
+        double ramp = std::clamp(elapsed / 2.5, 0.0, 1.0); 
         
-        double kp = 55.0 * ramp;
-        double kd = 0.5  * ramp;
+        // 70% MPC Authority.
+        double alpha = 0.0;
+        if (mpc_initialized_ && elapsed > 3.0) {
+            double t      = elapsed - 3.0;
+            double target = 1.00;   
+            alpha = std::min(t / 2.0, 1.0) * target;  
+        }
+        current_alpha_ = alpha;  
+        
+        double ff_fade = std::clamp(1.0 - alpha, 0.0, 1.0);
 
         std::vector<double> pd_tau(12, 0.0);
         std::vector<double> mpc_tau(12, 0.0);
 
         for (int i = 0; i < 12; ++i) {
-            if (std::abs(current_vel[i]) < 0.05) current_vel[i] = 0.0;
+            // PURE RAW VELOCITY
+            double vel = current_vel[i];
             
+            // THE FIX: PURE RAW POSITION! No low-pass filter to slow down the swing trajectory!
+            // The leg will now lift exactly when and where the Gait Planner tells it to.
             double active_target = start_pos_[i] + (target_q[i] - start_pos_[i]) * ramp;
+            double error = active_target - current_pos[i];
             
-            pd_tau[i] = kp * (active_target - current_pos[i]) - kd * current_vel[i];
+            double kp, kd;
+            if (contacts[i/3] == 1) {
+                // Stance Phase: Soft so it doesn't fight the MPC
+                
+                kp = 40.0 * ramp;
+                kd = 0.5 * ramp;
+            } else {
+                // Swing Phase: Very stiff so it strictly traces the air curve
+                kp = 70.0 * ramp;
+                kd = 0.5 * ramp;
+            }
+            int joint_type = i % 3;  // 0=hip, 1=thigh, 2=calf
+
+
+            // if (joint_type == 0) {
+            //     kp = 90.0 * ramp;   // hip needs 2× — fighting gravity moment
+            //     kd = 0.8  * ramp;   // more damping too — stop the oscillation
+            // }
             
-            // Only apply static feedforward if the leg is ON THE GROUND
+            pd_tau[i] = (kp * error) - (kd * vel);
+
+            if (i % 3 == 0) {  // hip joint
+                int leg = i / 3;
+                if (leg == 0 || leg == 2) {
+                    // LF, LH: positive hip target needs negative feedforward
+                    pd_tau[i] -= 4.0 * ramp;
+                } else {
+                    // RF, RH: negative hip target needs positive feedforward
+                    pd_tau[i] += 4.0 * ramp;
+                }
+            }
+            
+            // Symmetrical Static Gravity
             if (contacts[i / 3] == 1) {
-                if (i % 3 == 1) pd_tau[i] += -2.0 * ramp;
-                if (i % 3 == 2) pd_tau[i] +=  5.0 * ramp;
+                if (i % 3 == 1) pd_tau[i] += -1.0 * ramp * ff_fade;
+                if (i % 3 == 2) pd_tau[i] +=  5.0 * ramp * ff_fade;
+            } else {
+                if (i % 3 == 1) pd_tau[i] += -0.5 * ramp;
+                if (i % 3 == 2) pd_tau[i] +=  1.5 * ramp;
             }
         }
 
@@ -275,7 +353,6 @@ private:
         rot.setRPY(roll_, pitch_, 0.0);
 
         for (int i = 0; i < 4; ++i) {
-            // STEP 3 SAFETY: Only apply MPC forces if the foot is physically touching the ground!
             if (mpc_ready && contacts[i] == 1) {
                 Eigen::Matrix3d J = go2_physics::calcLegJacobian(current_pos[i*3], current_pos[i*3+1], current_pos[i*3+2], i);
 
@@ -291,18 +368,13 @@ private:
                 mpc_tau[i*3+1] = -1.0*(J(0,1)*bx + J(1,1)*by + J(2,1)*bz);
                 mpc_tau[i*3+2] = -1.0*(J(0,2)*bx + J(1,2)*by + J(2,2)*bz);
             } else {
-                // Leg is in swing phase (air), ignore MPC completely!
+                // When in swing phase, MPC provides EXACTLY 0.0 force! PD handles the swing purely.
                 mpc_tau[i*3+0] = 0.0;
                 mpc_tau[i*3+1] = 0.0;
                 mpc_tau[i*3+2] = 0.0;
             }
 
-            double alpha = 0.0; 
-            if (mpc_ready && elapsed > 4.0) {
-                alpha = 0.45;
-            }
-            
-            effort_msg.data[i*3+0] = std::clamp(pd_tau[i*3+0] + alpha*mpc_tau[i*3+0], -23.70, 23.70);
+            effort_msg.data[i*3+0] = std::clamp(pd_tau[i*3+0] , -23.70, 23.70);
             effort_msg.data[i*3+1] = std::clamp(pd_tau[i*3+1] + alpha*mpc_tau[i*3+1], -23.70, 23.70);
             effort_msg.data[i*3+2] = std::clamp(pd_tau[i*3+2] + alpha*mpc_tau[i*3+2], -45.43, 45.43);
         }
@@ -313,7 +385,15 @@ private:
             log_counter_ = 0;
             std::cout << "\n--- CONTROL STATUS  elapsed=" << std::fixed << std::setprecision(1) << elapsed
                       << "s  ramp=" << (ramp*100) << "%"
-                      << "  MPC=" << (mpc_ready ? "BLENDING 15%" : "WAIT") << " ---\n";
+                      << "  MPC=" << (mpc_ready ? "BLENDING " + std::to_string((int)(alpha*100)) + "%" : "WAIT") << " ---\n";
+                      
+            double r_deg, p_deg, y_deg;
+            rot.getRPY(r_deg, p_deg, y_deg);
+            std::cout << "CHASSIS TILT -> Roll: " << std::setprecision(2) << r_deg * 180.0 / M_PI 
+                      << " deg | Pitch: " << p_deg * 180.0 / M_PI << " deg\n";
+                      
+            std::cout << "Z-HEIGHT -> Actual: " << std::setprecision(3) << pos_z_ << " m | Target: 0.280 m\n";
+                      
             std::cout << std::left << std::setw(20) << "JOINT" 
                       << std::right << std::setw(10) << "TARGET" 
                       << std::setw(10) << "ACTUAL" 

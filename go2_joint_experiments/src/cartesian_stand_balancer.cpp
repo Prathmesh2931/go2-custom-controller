@@ -27,7 +27,7 @@ public:
     }
 
 private:
-    const std::vector<double> targets = {0.0, 0.67, -1.30, 0.0, 0.67, -1.30, 0.0, 0.67, -1.30, 0.0, 0.67, -1.30};
+    const std::vector<double> targets = {0.0, 0.76, -1.591, 0.0, 0.76, -1.591, 0.0, 0.76, -1.591, 0.0, 0.76, -1.591};
     
     // USER OPTIMIZED STABLE GAINS
     // These specific values prevent Gazebo's numerical physics engine from vibrating.

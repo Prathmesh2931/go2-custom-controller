@@ -6,23 +6,24 @@ MpcSolver::MpcSolver() {
     A_c.setZero();
     B_c.setZero();
     
-    // Continuous A Matrix static parts
-    A_c.block<3, 3>(3, 9) = Eigen::Matrix3d::Identity(); // p_dot = v
-    A_c(11, 12) = 1.0; // velocity derivative in Z is affected by gravity
+    A_c.block<3, 3>(3, 9) = Eigen::Matrix3d::Identity(); 
+    A_c(11, 12) = 1.0; 
 
-    // MPC Tuning Weights
     Q.setZero();
-    Q.diagonal() << 50.0, 50.0, 20.0,   // RPY
-                    2.0,   2.0,   50.0,  // XYZ Position
-                    1.0,   1.0,   1.0,    // Angular Velocity
-                    1.0,   1.0,   1.0,    // Linear Velocity
+    // Allow the robot to roll and pitch slightly during the trot so the solver doesn't panic
+    Q.diagonal() << 80.0,   80.0,   0.0,    // RPY 
+                    0.0,   0.0,   120.0,  // XYZ (Z-Height is King)
+                    2.0,   2.0,   0.0,    // Ang Vel 
+                    0.0,   0.0,   25.0,    // Lin Vel 
                     0.0;                  // Gravity
 
     R.setIdentity();
     for(int i=0; i<4; i++) {
-        R(i*3+0, i*3+0) = 1e-2; // Fx penalty (Expensive: Stop pushing forward/backward)
-        R(i*3+1, i*3+1) = 1e-2; // Fy penalty (Expensive: Stop splaying outward)
-        R(i*3+2, i*3+2) = 1e-4; // Fz penalty (Cheap: Use vertical force to balance!)
+        // THE HIP SPLIT FIX: Fx and Fy are heavily penalized. 
+        // The MPC is forbidden from generating lateral forces that rip the hips apart!
+        R(i*3+0, i*3+0) = 1.0;  // Fx penalty (Medium)
+        R(i*3+1, i*3+1) = 20.0;  // Fy penalty (MASSIVE penalty. Leave the Wide Stance alone!)
+        R(i*3+2, i*3+2) = 1e-2; // Fz penalty (Cheap vertical thrusts)
     }
 }
 
@@ -62,15 +63,13 @@ void MpcSolver::buildContinuousMatrices(double yaw, const std::vector<Eigen::Vec
     }
 }
 
-MpcSolver::ForceVector MpcSolver::solve(const StateVector& current_state, const std::vector<Eigen::Vector3d>& foot_positions, double target_z) {
+MpcSolver::ForceVector MpcSolver::solve(const StateVector& current_state, const std::vector<Eigen::Vector3d>& foot_positions, double target_z, const std::vector<int>& contact_state) {
     buildContinuousMatrices(current_state(2), foot_positions);
 
-    // CRITICAL BUG FIX: Enforce core physics constants so matrices don't multiply by 0.0
     double dt_safe = 0.03;
     double mu_safe = 0.6;
-    double f_max_safe = 100.0;
+    double f_max_safe = 120.0; 
 
-    // Forward Euler Discretization
     A_d = Eigen::Matrix<double, 13, 13>::Identity() + A_c * dt_safe;
     B_d = B_c * dt_safe;
 
@@ -110,7 +109,7 @@ MpcSolver::ForceVector MpcSolver::solve(const StateVector& current_state, const 
 
     Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> H;
     H = 2.0 * (B_qp.transpose() * Q_bar * B_qp + R_bar);
-    H = 0.5 * (H + H.transpose().eval()); // Force Symmetry
+    H = 0.5 * (H + H.transpose().eval()); 
     
     Eigen::Matrix<double, Eigen::Dynamic, 1> g;
     g = 2.0 * B_qp.transpose() * Q_bar * (A_qp * current_state - X_ref);
@@ -128,23 +127,29 @@ MpcSolver::ForceVector MpcSolver::solve(const StateVector& current_state, const 
         for (int leg = 0; leg < 4; ++leg) {
             int v_idx = step * 12 + leg * 3;
             
-            // Apply mu_safe and f_max_safe so the bounds are physically possible
+            double current_f_max = (contact_state[leg] == 1) ? f_max_safe : 0.0;
+            double current_f_min = 0.0; // STRICTLY 0.0. No friction cone inversions allowed.
+
             C_mat(c_idx, v_idx) = 1.0;  C_mat(c_idx, v_idx + 2) = -mu_safe; lbA(c_idx) = -1e5; ubA(c_idx) = 0.0; c_idx++;
             C_mat(c_idx, v_idx) = -1.0; C_mat(c_idx, v_idx + 2) = -mu_safe; lbA(c_idx) = -1e5; ubA(c_idx) = 0.0; c_idx++;
             
             C_mat(c_idx, v_idx + 1) = 1.0;  C_mat(c_idx, v_idx + 2) = -mu_safe; lbA(c_idx) = -1e5; ubA(c_idx) = 0.0; c_idx++;
             C_mat(c_idx, v_idx + 1) = -1.0; C_mat(c_idx, v_idx + 2) = -mu_safe; lbA(c_idx) = -1e5; ubA(c_idx) = 0.0; c_idx++;
             
-            C_mat(c_idx, v_idx + 2) = 1.0; lbA(c_idx) = 0.0; ubA(c_idx) = f_max_safe; c_idx++;
+            C_mat(c_idx, v_idx + 2) = 1.0; lbA(c_idx) = current_f_min; ubA(c_idx) = current_f_max; c_idx++;
         }
     }
 
     int nWSR = 10000; 
 
+    // static qpOASES::QProblem* qp_problem = nullptr;
+    // if (!qp_problem) {
     qpOASES::QProblem qp_problem(num_variables, num_constraints);
-    qpOASES::Options options;
-    options.printLevel = qpOASES::PL_NONE; 
+    qpOASES::Options options; 
+    options.setToMPC();   
+    options.printLevel = qpOASES::PL_NONE;                 
     qp_problem.setOptions(options);
+    // }
 
     qpOASES::returnValue status = qp_problem.init(
         H.data(), g.data(), C_mat.data(), 
