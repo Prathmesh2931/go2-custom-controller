@@ -47,7 +47,7 @@ target_link_libraries(mpc_trajectory_gen Eigen3::Eigen)
 ament_target_dependencies(mpc_trajectory_gen rclcpp trajectory_msgs sensor_msgs nav_msgs geometry_msgs)
 
 add_executable(trot_gait src/trot_gait.cpp)
-ament_target_dependencies(trot_gait rclcpp trajectory_msgs sensor_msgs geometry_msgs)
+ament_target_dependencies(trot_gait rclcpp trajectory_msgs sensor_msgs geometry_msgs nav_msgs)
 
 install(
   DIRECTORY include/ src/
