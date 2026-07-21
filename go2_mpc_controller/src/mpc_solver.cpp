@@ -1,5 +1,5 @@
 #include "go2_mpc_controller/mpc_solver.hpp"
-#include "go2_mpc_controller/robot_dynamics.hpp"
+#include "go2_mpc_controller/robot_model.hpp"
 #include <iostream>
 
 MpcSolver::MpcSolver() {
@@ -10,20 +10,20 @@ MpcSolver::MpcSolver() {
     A_c(11, 12) = 1.0; 
 
     Q.setZero();
-    // Allow the robot to roll and pitch slightly during the trot so the solver doesn't panic
-    Q.diagonal() << 80.0,   80.0,   0.0,    // RPY 
-                    0.0,   0.0,   120.0,  // XYZ (Z-Height is King)
-                    2.0,   2.0,   0.0,    // Ang Vel 
-                    0.0,   0.0,   25.0,    // Lin Vel 
-                    0.0;                  // Gravity
+    // THE STABILITY FIX: Penalize X/Y drift so the robot stays centered.
+    // Heavy damping on Lin Vel Z (30.0) acts as a mathematical shock absorber.
+    Q.diagonal() << 30.0,   30.0,   30.0,    // RPY (Posture)
+                     20.0,   20.0,  200.0,   // XYZ (Control drift & heavily defend Z)
+                     10.0,   10.0,   10.0,   // Ang Vel 
+                     50.0,   50.0,   20.0,   // Lin Vel (High X/Y to force the forward push!)
+                     0.0;                    // Gravity State (Disabled for Delta-Force)
 
     R.setIdentity();
     for(int i=0; i<4; i++) {
-        // THE HIP SPLIT FIX: Fx and Fy are heavily penalized. 
-        // The MPC is forbidden from generating lateral forces that rip the hips apart!
-        R(i*3+0, i*3+0) = 1.0;  // Fx penalty (Medium)
-        R(i*3+1, i*3+1) = 20.0;  // Fy penalty (MASSIVE penalty. Leave the Wide Stance alone!)
-        R(i*3+2, i*3+2) = 1e-2; // Fz penalty (Cheap vertical thrusts)
+        // THE STRAIGHT-LINE FIX: 
+        R(i*3+0, i*3+0) = 0.1;   // Fx: CHEAP (Unleash horizontal forward drive!)
+        R(i*3+1, i*3+1) = 3.0;   // Fy: EXPENSIVE (Kills the "drunk" sideways drifting!)
+        R(i*3+2, i*3+2) = 1.0;   // Fz: Smooth continuous vertical thrust
     }
 }
 
@@ -48,8 +48,10 @@ void MpcSolver::buildContinuousMatrices(double yaw, const std::vector<Eigen::Vec
     A_c.block<3, 3>(0, 6) = Rz;
 
     double mass = go2_physics::MASS;
-    Eigen::Matrix3d I_G_body = go2_physics::getInertiaTensor();
-    Eigen::Vector3d p_com_body = go2_physics::getCoMOffset();
+    
+    // --- FIX: Route through the new Single Source of Truth ---
+    Eigen::Matrix3d I_G_body = go2_physics::RobotModel::getInertiaTensor();
+    Eigen::Vector3d p_com_body = go2_physics::RobotModel::getCoMOffset();
 
     Eigen::Matrix3d I_G_yaw = Rz * I_G_body * Rz.transpose();
     Eigen::Matrix3d I_G_inv = I_G_yaw.inverse();
@@ -63,12 +65,14 @@ void MpcSolver::buildContinuousMatrices(double yaw, const std::vector<Eigen::Vec
     }
 }
 
-MpcSolver::ForceVector MpcSolver::solve(const StateVector& current_state, const std::vector<Eigen::Vector3d>& foot_positions, double target_z, const std::vector<int>& contact_state) {
+MpcSolver::ForceVector MpcSolver::solve(const StateVector& current_state, const std::vector<Eigen::Vector3d>& foot_positions, double target_z, const std::vector<int>& contact_state, double cmd_vx, double cmd_vy, double cmd_wz) {
     buildContinuousMatrices(current_state(2), foot_positions);
 
     double dt_safe = 0.03;
-    double mu_safe = 0.6;
-    double f_max_safe = 120.0; 
+    double mu_safe = 0.6; 
+    
+    // SAFETY CAP: Raised to 200N to safely handle dynamic trot impacts without crashing
+    double f_max_safe = 200.0; 
 
     A_d = Eigen::Matrix<double, 13, 13>::Identity() + A_c * dt_safe;
     B_d = B_c * dt_safe;
@@ -104,7 +108,14 @@ MpcSolver::ForceVector MpcSolver::solve(const StateVector& current_state, const 
     X_ref.setZero();
     for(int i = 0; i < N; ++i) {
         X_ref(i * 13 + 5) = target_z; 
-        X_ref(i * 13 + 12) = -9.81; 
+        X_ref(i * 13 + 7)  = 0.0;     
+        X_ref(i * 13 + 8)  = cmd_wz;  
+        X_ref(i * 13 + 9)  = cmd_vx;  
+        X_ref(i * 13 + 10) = cmd_vy;  
+        
+        // THE DECOUPLING FIX: We tell the solver gravity is 0.0. 
+        // It acts purely as a Delta-Force Posture stabilizer!
+        X_ref(i * 13 + 12) = 0.0;  
     }
 
     Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> H;
@@ -128,7 +139,7 @@ MpcSolver::ForceVector MpcSolver::solve(const StateVector& current_state, const 
             int v_idx = step * 12 + leg * 3;
             
             double current_f_max = (contact_state[leg] == 1) ? f_max_safe : 0.0;
-            double current_f_min = 0.0; // STRICTLY 0.0. No friction cone inversions allowed.
+            double current_f_min = 0.0; 
 
             C_mat(c_idx, v_idx) = 1.0;  C_mat(c_idx, v_idx + 2) = -mu_safe; lbA(c_idx) = -1e5; ubA(c_idx) = 0.0; c_idx++;
             C_mat(c_idx, v_idx) = -1.0; C_mat(c_idx, v_idx + 2) = -mu_safe; lbA(c_idx) = -1e5; ubA(c_idx) = 0.0; c_idx++;
@@ -142,14 +153,11 @@ MpcSolver::ForceVector MpcSolver::solve(const StateVector& current_state, const 
 
     int nWSR = 10000; 
 
-    // static qpOASES::QProblem* qp_problem = nullptr;
-    // if (!qp_problem) {
     qpOASES::QProblem qp_problem(num_variables, num_constraints);
     qpOASES::Options options; 
     options.setToMPC();   
     options.printLevel = qpOASES::PL_NONE;                 
     qp_problem.setOptions(options);
-    // }
 
     qpOASES::returnValue status = qp_problem.init(
         H.data(), g.data(), C_mat.data(), 

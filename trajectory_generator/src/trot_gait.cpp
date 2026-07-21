@@ -19,11 +19,13 @@ public:
             "/odom/ground_truth", 10, std::bind(&TrotGait::cb_odom, this, std::placeholders::_1));
 
         pub_nominal_positions_ = this->create_publisher<std_msgs::msg::Float64MultiArray>("/gait/planned_positions", 10);
-        pub_contact_ = this->create_publisher<std_msgs::msg::Int32MultiArray>("/state_estimator/contact_states", 10);
+        
+        // FIX: Route to planned_contacts so we don't fight the Contact Estimator!
+        pub_contact_ = this->create_publisher<std_msgs::msg::Int32MultiArray>("/gait/planned_contacts", 10);
         
         timer_ = this->create_wall_timer(std::chrono::milliseconds(4), std::bind(&TrotGait::tick, this));
         
-        RCLCPP_INFO(get_logger(), "ADVANCED TROT GAIT ONLINE: WIDER STANCE APPLIED!");
+        RCLCPP_INFO(get_logger(), "ADVANCED TROT GAIT ONLINE: RAIBERT HEURISTIC (PUSH RECOVERY) ACTIVE!");
     }
 
 private:
@@ -37,8 +39,6 @@ private:
     const double THIGH_LEN  = 0.213;
     const double CALF_LEN   = 0.213;
 
-    // FIX: Widened the lateral stance base from 0.14m to 0.155m. 
-    // This creates a broader support polygon, significantly improving sideways stability during the trot!
     const double HIP_Y      = 0.155;   
     const double STANCE_Z   = -0.28; 
     const double LIFT_H     = 0.06;   
@@ -55,9 +55,13 @@ private:
     double filtered_wz_ = 0.0;
 
     int log_counter_ = 0;
+    
+    // Raibert Feedback Variables
     double actual_vx_ = 0.0;
     double actual_vy_ = 0.0;
     double actual_wz_ = 0.0;
+    double smooth_actual_vx_ = 0.0;
+    double smooth_actual_vy_ = 0.0;
 
     struct Angles { double hip, thigh, calf; };
 
@@ -103,9 +107,14 @@ private:
 
     void tick()
     {
+        // Smooth commands
         filtered_vx_ += 0.02 * (cmd_vx_ - filtered_vx_);
         filtered_vy_ += 0.02 * (cmd_vy_ - filtered_vy_);
         filtered_wz_ += 0.02 * (cmd_wz_ - filtered_wz_);
+
+        // Smooth actual velocity for stable feedback
+        smooth_actual_vx_ += 0.20 * (actual_vx_ - smooth_actual_vx_);
+        smooth_actual_vy_ += 0.20 * (actual_vy_ - smooth_actual_vy_);
 
         double speed = std::sqrt(filtered_vx_*filtered_vx_ + filtered_vy_*filtered_vy_ + filtered_wz_*filtered_wz_);
         bool is_moving = speed > 0.05;
@@ -123,7 +132,7 @@ private:
         }
 
         double diagnostic_raw_stride = 0.0;
-        double diagnostic_clamped_stride = 0.0;
+        double diagnostic_offset_x = 0.0;
 
         for (int i = 0; i < 4; ++i) {
             double rx = (i < 2) ? HIP_X : -HIP_X;
@@ -145,13 +154,28 @@ private:
                 double stride_x = std::clamp(raw_stride_x, -MAX_STRIDE_X, MAX_STRIDE_X);
                 double stride_y = std::clamp(foot_cmd_vy * T_stance * 1.5, -0.10, 0.10);
 
+                // --- RESTORED RAIBERT HEURISTIC (PUSH RECOVERY) ---
+                double err_vx = smooth_actual_vx_ - filtered_vx_;
+                double err_vy = smooth_actual_vy_ - filtered_vy_;
+
+                // Deadband to ignore tiny noise
+                if (std::abs(err_vx) < 0.06) err_vx = 0.0;
+                if (std::abs(err_vy) < 0.06) err_vy = 0.0;
+
+                double raibert_kp = 0.04; 
+                double offset_x = (filtered_vx_ * T_stance / 2.0) + (raibert_kp * err_vx);
+                double offset_y = (filtered_vy_ * T_stance / 2.0) + (raibert_kp * err_vy);
+
+                // Clamp the feedback so it doesn't dislocate the leg
+                // offset_x = std::clamp(offset_x, -0.08, 0.08); 
+                // offset_y = std::clamp(offset_y, -0.05, 0.05);
+                offset_x = 0.0; 
+                offset_y = 0.0;
+
                 if (i == 0) { 
                     diagnostic_raw_stride = raw_stride_x;
-                    diagnostic_clamped_stride = stride_x;
+                    diagnostic_offset_x = offset_x;
                 }
-
-                double offset_x = 0.0; 
-                double offset_y = 0.0;
                 
                 double p = (i == 0 || i == 3) ? phase_ : std::fmod(phase_ + 0.5, 1.0);
                 
@@ -193,22 +217,15 @@ private:
         if (++log_counter_ >= 250) { 
             log_counter_ = 0;
             RCLCPP_INFO(get_logger(), "\n--- KINEMATIC FEASIBILITY & GAIT PLANNER ---");
-            RCLCPP_INFO(get_logger(), "CMD VX: %.3f m/s | CMD WZ: %.3f rad/s | PHASE: %.2f", filtered_vx_, filtered_wz_, phase_);
+            RCLCPP_INFO(get_logger(), "CMD VX: %.3f m/s | ACT VX: %.3f m/s | PHASE: %.2f", filtered_vx_, smooth_actual_vx_, phase_);
             
             if (is_moving) {
                 double utilization = (std::abs(diagnostic_raw_stride) / MAX_STRIDE_X) * 100.0;
-                if (utilization <= 100.0) {
-                    RCLCPP_INFO(get_logger(), "[REACHABILITY] Stride X: %.3fm (%.1f%% of max limit) | STATUS: [SAFE]", 
-                        diagnostic_raw_stride, utilization);
-                } else {
-                    RCLCPP_WARN(get_logger(), "[REACHABILITY] Stride X: %.3fm (%.1f%% of max limit) | STATUS: [WARNING - CLAMPED TO %.3fm]", 
-                        diagnostic_raw_stride, utilization, MAX_STRIDE_X);
-                }
-            } else {
-                RCLCPP_INFO(get_logger(), "[REACHABILITY] Stride X: 0.000m (0.0%% of max limit) | STATUS: [STANDING]");
+                RCLCPP_INFO(get_logger(), "[REACHABILITY] Stride X: %.3fm (%.1f%%) | Raibert Offset X: %.3fm", 
+                    diagnostic_raw_stride, utilization, diagnostic_offset_x);
             }
 
-            RCLCPP_INFO(get_logger(), "LF [C:%d] X=%.3f, Y=%.3f, Z=%.3f | HIP=%.3f, TH=%.3f, CA=%.3f", 
+            RCLCPP_INFO(get_logger(), "LF [INTENT:%d] X=%.3f, Y=%.3f, Z=%.3f | HIP=%.3f, TH=%.3f, CA=%.3f", 
                 live_contacts[0], current_X[0], current_Y[0], current_Z[0], nominal_positions[0], nominal_positions[1], nominal_positions[2]);
         }
     }

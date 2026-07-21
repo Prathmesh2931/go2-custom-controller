@@ -10,17 +10,20 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(eigen3_cmake_module REQUIRED)
 
+# Cross-package dependencies
+find_package(ament_index_cpp REQUIRED)
+find_package(go2_mpc_controller REQUIRED)
+
+# --- FIX: We must explicitly find Pinocchio here to satisfy the static math library! ---
+find_package(pinocchio REQUIRED)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # comment the line when a copyright and license is added to all source files
   set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # comment the line when this package is in a git repo and when
-  # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
@@ -43,12 +46,33 @@ add_executable(cartesian_stand_balancer src/cartesian_stand_balancer.cpp)
 target_link_libraries(cartesian_stand_balancer Eigen3::Eigen)
 ament_target_dependencies(cartesian_stand_balancer rclcpp trajectory_msgs sensor_msgs)
 
+add_executable(pure_pd_tracker src/pure_pd_tracker.cpp)
+# --- FIX: We explicitly link pinocchio::pinocchio to the final executable ---
+target_link_libraries(pure_pd_tracker Eigen3::Eigen pinocchio::pinocchio)
+ament_target_dependencies(pure_pd_tracker 
+  rclcpp 
+  sensor_msgs 
+  std_msgs
+  ament_index_cpp
+  go2_mpc_controller
+)
+
+add_executable(robot_model_validation src/robot_model_validation.cpp)
+target_link_libraries(robot_model_validation Eigen3::Eigen pinocchio::pinocchio)
+ament_target_dependencies(robot_model_validation 
+  rclcpp 
+  ament_index_cpp
+  go2_mpc_controller
+)
+
 install(TARGETS
   trajectory_inspector
   stand_pose_publisher
   static_stand_balancer
   dynamic_stand_balancer
   cartesian_stand_balancer
+  pure_pd_tracker
+  robot_model_validation
   DESTINATION lib/${PROJECT_NAME}
 )
 

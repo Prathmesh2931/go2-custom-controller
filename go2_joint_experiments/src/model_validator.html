@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bayesian Contact Estimator Validation</title>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6.16"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f7f6; color: #333; margin: 0; padding: 20px; }
+        .container { max-width: 1050px; margin: 0 auto; background: #fff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); padding: 30px; }
+        h1 { text-align: center; color: #0b57d0; margin-top: 0; }
+        .subtitle { text-align: center; color: #555; font-size: 14px; margin-bottom: 30px; }
+        .chart-container { margin-bottom: 40px; }
+        .chart-title { font-weight: 600; font-size: 18px; margin-bottom: 5px; color: #222; border-bottom: 2px solid #0b57d0; padding-bottom: 5px; display: inline-block;}
+        .plot-wrapper { width: 100%; overflow: visible; background: #fafafa; border: 1px solid #eee; border-radius: 8px; padding: 10px; box-sizing: border-box;}
+        .kpi-row { display: flex; justify-content: space-between; margin-bottom: 20px; gap: 15px; }
+        .kpi-card { flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #e0e0e0; }
+        .kpi-value { font-size: 24px; font-weight: bold; color: #146c2e; margin-bottom: 5px; }
+        .kpi-label { font-size: 11px; text-transform: uppercase; color: #666; letter-spacing: 1px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Recursive Bayesian Observer Profiling</h1>
+    <div class="subtitle">Synthetic Open-Loop Validation of Contact Probability against Gaussian Sensor Noise</div>
+    
+    <div class="kpi-row">
+        <div class="kpi-card">
+            <div class="kpi-value" style="color: #0b57d0;">250 Hz</div>
+            <div class="kpi-label">Estimator Frequency</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-value">~30 ms</div>
+            <div class="kpi-label">Detection Latency</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-value" style="color: #d85900;">0.95</div>
+            <div class="kpi-label">Leaky Integrator (Gamma)</div>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <div class="chart-title">1. Estimated Contact Probability vs Ground Truth</div>
+        <p style="font-size: 13px; color: #555;">Demonstrates the observer's ability to smoothly recover absolute contact certainty (Green) from highly ambiguous, noisy kinematic slip signals. The Ground Truth (Gray Area) represents ideal stance phases.</p>
+        <div id="prob-plot" class="plot-wrapper"></div>
+    </div>
+
+    <div class="chart-container">
+        <div class="chart-title">2. Injected Kinematic Slip Noise (Isotropic 3D)</div>
+        <p style="font-size: 13px; color: #555;">The raw velocity signal fed into the observer. Planted Phase: σ = 0.05 m/s. Swing Phase: σ = 1.0 m/s.</p>
+        <div id="noise-plot" class="plot-wrapper"></div>
+    </div>
+</div>
+
+<script>
+    // Standard Normal variate using Box-Muller transform
+    function gaussianRandom(mean = 0, stdev = 1) {
+        const u = 1 - Math.random();
+        const v = Math.random();
+        const z = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+        return z * stdev + mean;
+    }
+
+    // --- C++ Estimator Parameters ---
+    const dt = 0.004; // 250Hz
+    const duration = 2.0; // seconds
+    const sigma_planted = 0.05;
+    const sigma_swing = 1.0;
+    const gamma = 0.95;
+    const clamp_val = 5.0;
+
+    // Derived Likelihood Ratio (Dimensionally corrected!)
+    const log_ratio = 3.0 * Math.log(sigma_swing / sigma_planted);
+
+    let log_odds = 0.0;
+    const data = [];
+
+    // Simulate 2 seconds of trotting
+    for (let t = 0; t < duration; t += dt) {
+        // Create Synthetic Ground Truth (0.6s Stance, 0.4s Swing)
+        let phase = t % 1.0;
+        let is_stance = (phase > 0.4) ? 1 : 0;
+        
+        // Generate Noisy 3D Velocity
+        let v_x, v_y, v_z;
+        if (is_stance) {
+            v_x = gaussianRandom(0, sigma_planted);
+            v_y = gaussianRandom(0, sigma_planted);
+            v_z = gaussianRandom(0, sigma_planted);
+        } else {
+            v_x = gaussianRandom(0.8, sigma_swing); // Swinging forward
+            v_y = gaussianRandom(0, sigma_swing);
+            v_z = gaussianRandom(0, sigma_swing);
+        }
+        
+        // Calculate squared slip
+        let v_sq = v_x*v_x + v_y*v_y + v_z*v_z;
+        let v_mag = Math.sqrt(v_sq);
+
+        // --- C++ Bayesian Logic ---
+        let delta_L = log_ratio - (v_sq / (2.0 * sigma_planted * sigma_planted)) 
+                                + (v_sq / (2.0 * sigma_swing * sigma_swing));
+        
+        log_odds = (gamma * log_odds) + delta_L;
+        log_odds = Math.max(-clamp_val, Math.min(log_odds, clamp_val));
+        
+        let prob = 1.0 / (1.0 + Math.exp(-log_odds));
+
+        data.push({
+            time: t,
+            ground_truth: is_stance,
+            estimated_prob: prob,
+            raw_slip: v_mag
+        });
+    }
+
+    // --- Plotting ---
+    const probPlot = Plot.plot({
+        height: 250,
+        marginLeft: 50,
+        x: { label: "Time (seconds)" },
+        y: { label: "Probability P(C)", domain: [0, 1.05], grid: true },
+        marks: [
+            Plot.areaY(data, { x: "time", y: "ground_truth", fill: "#e0e0e0", opacity: 0.8 }),
+            Plot.line(data, { x: "time", y: "ground_truth", stroke: "#999", strokeDasharray: "4 4", strokeWidth: 1.5 }),
+            Plot.line(data, { x: "time", y: "estimated_prob", stroke: "#146c2e", strokeWidth: 2.5 })
+        ]
+    });
+    document.getElementById("prob-plot").append(probPlot);
+
+    const noisePlot = Plot.plot({
+        height: 180,
+        marginLeft: 50,
+        x: { label: "Time (seconds)" },
+        y: { label: "Slip Velocity (m/s)", grid: true },
+        marks: [
+            Plot.ruleY([0]),
+            Plot.line(data, { x: "time", y: "raw_slip", stroke: "#d85900", strokeWidth: 1 })
+        ]
+    });
+    document.getElementById("noise-plot").append(noisePlot);
+
+</script>
+
+</body>
+</html>

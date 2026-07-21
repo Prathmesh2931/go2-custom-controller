@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Go2 Analytical IK Geometry</title>
+    <style>
+        :root {
+            --primary: #0b57d0;
+            --surface: #ffffff;
+            --surface-container: #f0f4f9;
+            --on-surface: #1b1c1d;
+            --outline: #747775;
+            --thigh-color: #d85900;
+            --calf-color: #046e00;
+            --hip-color: #681da8;
+            --virtual-color: #1558d6;
+            --math-color: #d63384;
+        }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 0; background: var(--surface-container); color: var(--on-surface); }
+        .container { display: flex; flex-direction: row; height: 100vh; overflow: hidden; }
+        .panel { padding: 20px; overflow-y: auto; }
+        .left-panel { flex: 1; min-width: 420px; max-width: 450px; display: flex; flex-direction: column; gap: 15px; border-right: 1px solid var(--outline); background: var(--surface); padding: 20px; overflow-y: auto;}
+        .right-panel { flex: 1.5; display: flex; flex-direction: column; background: #fafafa; }
+        .canvas-container { flex: 1; position: relative; background: #fff; border: 1px solid var(--outline); border-radius: 8px; margin: 10px 20px 20px 20px; box-shadow: inset 0 2px 4px rgba(0,0,0,0.05); }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        h2, h3 { margin-top: 0; color: #333; }
+        .control-group { background: #fff; padding: 15px; border-radius: 8px; border: 1px solid var(--outline); box-shadow: 0 2px 4px rgba(0,0,0,0.02);}
+        .slider-row { display: flex; align-items: center; margin-bottom: 10px; }
+        .slider-row label { width: 90px; font-weight: bold; font-size: 0.9em; }
+        .slider-row input[type="range"] { flex: 1; margin: 0 10px; }
+        .slider-row span { width: 50px; text-align: right; font-family: monospace; }
+        .math-box { background: #fff; border: 1px solid #e0e0e0; border-left: 4px solid var(--primary); padding: 12px; margin-bottom: 12px; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+        .code-snippet { font-family: 'Courier New', Courier, monospace; background: #f4f4f4; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; color: var(--math-color); font-weight: bold;}
+        .math-title { font-weight: bold; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;}
+        .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+        
+        .dot.hip { background: var(--hip-color); }
+        .dot.thigh { background: var(--thigh-color); }
+        .dot.calf { background: var(--calf-color); }
+        .dot.virtual { background: var(--virtual-color); }
+
+        .radio-group { display: flex; gap: 15px; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #eee; }
+        .radio-group label { display: flex; align-items: center; gap: 5px; cursor: pointer; font-weight: bold;}
+        .instruction { font-size: 0.85em; color: #666; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="left-panel">
+            <h2>Go2 Kinematics Textbook</h2>
+            
+            <div class="control-group">
+                <div class="radio-group">
+                    <label><input type="radio" name="leg_idx" value="0" checked onchange="update()"> Left Leg (+Y Offset)</label>
+                    <label><input type="radio" name="leg_idx" value="1" onchange="update()"> Right Leg (-Y Offset)</label>
+                </div>
+                <div class="instruction">Move the foot target to see the geometry adapt:</div>
+                <div class="slider-row">
+                    <label>X (Forward)</label>
+                    <input type="range" id="val_x" min="-0.20" max="0.20" step="0.01" value="0.08" oninput="update()">
+                    <span id="lbl_x">0.08m</span>
+                </div>
+                <div class="slider-row">
+                    <label>Y (Lateral)</label>
+                    <input type="range" id="val_y" min="0.05" max="0.25" step="0.01" value="0.15" oninput="update()">
+                    <span id="lbl_y">0.15m</span>
+                </div>
+                <div class="slider-row">
+                    <label>Z (Height)</label>
+                    <input type="range" id="val_z" min="-0.40" max="-0.15" step="0.01" value="-0.28" oninput="update()">
+                    <span id="lbl_z">-0.28m</span>
+                </div>
+            </div>
+
+            <div class="math-box">
+                <div class="math-title"><span class="dot hip"></span> Step 1: The Hip Joint (Y-Z Plane)</div>
+                <div>The Hip Motor physically offsets the leg by <span class="code-snippet">L1</span>. We solve the right triangle to find the effective leg length.</div>
+                <ul style="margin: 8px 0; padding-left: 20px; font-size: 0.85em;">
+                    <li><span class="code-snippet">r2d = &radq;(y&sup2; + z&sup2;)</span> : Hypotenuse to Foot.</li>
+                    <li><span class="code-snippet">L2_proj = &radq;(r2d&sup2; - L1&sup2;)</span> : Virtual leg length.</li>
+                    <li><span class="code-snippet">&theta;_hip = atan2(y, -z) - sign * atan2(L1, L2_proj)</span></li>
+                </ul>
+                <strong>Calculated Hip: </strong> <span id="out_hip" style="color:var(--hip-color); font-weight:bold;">0.00</span> rad
+            </div>
+
+            <div class="math-box">
+                <div class="math-title"><span class="dot calf"></span> Step 2: The Calf Joint (Law of Cosines)</div>
+                <div>We now solve the 2D Tilted Leg using <span class="code-snippet">L2_proj</span> as the new Vertical axis.</div>
+                <ul style="margin: 8px 0; padding-left: 20px; font-size: 0.85em;">
+                    <li><span class="code-snippet">leg_dist = &radq;(x&sup2; + L2_proj&sup2;)</span></li>
+                    <li><span class="code-snippet">cos_calf = (leg_dist&sup2; - L2&sup2; - L3&sup2;) / (2*L2*L3)</span></li>
+                    <li><span class="code-snippet">&theta;_calf = -acos(cos_calf)</span> (Negative = bend backwards)</li>
+                </ul>
+                <strong>Calculated Calf: </strong> <span id="out_calf" style="color:var(--calf-color); font-weight:bold;">0.00</span> rad
+            </div>
+
+            <div class="math-box">
+                <div class="math-title"><span class="dot thigh"></span> Step 3: The Thigh Joint (X-Z Plane)</div>
+                <div>The thigh angle is determined by subtracting the foot's angle from the internal triangle angle.</div>
+                <ul style="margin: 8px 0; padding-left: 20px; font-size: 0.85em;">
+                    <li><span class="code-snippet">&alpha; = atan2(x, L2_proj)</span> : Foot angle from vertical.</li>
+                    <li><span class="code-snippet">&beta; = acos(...)</span> : Inner triangle angle via Cosine rule.</li>
+                    <li><span class="code-snippet">&theta;_thigh = &beta; - &alpha;</span></li>
+                </ul>
+                <strong>Calculated Thigh: </strong> <span id="out_thigh" style="color:var(--thigh-color); font-weight:bold;">0.00</span> rad
+            </div>
+        </div>
+
+        <div class="right-panel">
+            <h3 style="padding: 20px 20px 0 20px; margin: 0;">1. Front View Projection (Y-Z Plane)</h3>
+            <div class="instruction" style="padding-left: 20px;">Shows how L1 creates a right triangle with L2_proj and r2d.</div>
+            <div class="canvas-container">
+                <canvas id="canvas_yz"></canvas>
+            </div>
+            
+            <h3 style="padding: 10px 20px 0 20px; margin: 0;">2. Leg Plane Projection (X-L2_proj Plane)</h3>
+            <div class="instruction" style="padding-left: 20px;">Shows how the leg bends mathematically in its own tilted 2D space.</div>
+            <div class="canvas-container">
+                <canvas id="canvas_xz"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Go2 Physical Constants
+        const HIP_OFFSET = 0.0955;
+        const THIGH_LEN = 0.213;
+        const CALF_LEN = 0.213;
+
+        const canvasYZ = document.getElementById('canvas_yz');
+        const ctxYZ = canvasYZ.getContext('2d');
+        const canvasXZ = document.getElementById('canvas_xz');
+        const ctxXZ = canvasXZ.getContext('2d');
+
+        function resizeCanvas() {
+            const rectYZ = canvasYZ.parentElement.getBoundingClientRect();
+            canvasYZ.width = rectYZ.width;
+            canvasYZ.height = rectYZ.height;
+            
+            const rectXZ = canvasXZ.parentElement.getBoundingClientRect();
+            canvasXZ.width = rectXZ.width;
+            canvasXZ.height = rectXZ.height;
+            update();
+        }
+        window.addEventListener('resize', resizeCanvas);
+
+        function drawLine(ctx, x1, y1, x2, y2, color, width = 2, dashed = false) {
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+            ctx.setLineDash(dashed ? [5, 5] : []);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function drawCircle(ctx, x, y, radius, color) {
+            ctx.beginPath();
+            ctx.arc(x, y, radius, 0, 2 * Math.PI);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        // Dedicated Label function that avoids overlaps using a solid background pill
+        function drawLabel(ctx, text, x, y, textColor, bgColor = '#ffffff', align = 'center') {
+            ctx.font = 'bold 12px "Segoe UI", Arial, sans-serif';
+            ctx.textAlign = align;
+            ctx.textBaseline = 'middle';
+            const textWidth = ctx.measureText(text).width;
+            const padX = 8;
+            const padY = 6;
+            
+            const rectX = x - (align === 'center' ? textWidth / 2 : (align === 'right' ? textWidth : 0)) - padX;
+            const rectY = y - padY - 6;
+            const rectW = textWidth + padX * 2;
+            const rectH = 24;
+
+            ctx.fillStyle = bgColor;
+            ctx.fillRect(rectX, rectY, rectW, rectH);
+            ctx.strokeStyle = textColor;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(rectX, rectY, rectW, rectH);
+            
+            ctx.fillStyle = textColor;
+            ctx.fillText(text, x, y);
+        }
+
+        function update() {
+            const x = parseFloat(document.getElementById('val_x').value);
+            let y = parseFloat(document.getElementById('val_y').value);
+            const z = parseFloat(document.getElementById('val_z').value);
+            const isLeft = document.querySelector('input[name="leg_idx"]:checked').value === "0";
+            
+            // Sign mapping for UI
+            if (!isLeft && y > 0) y = -y;
+            if (isLeft && y < 0) y = -y;
+
+            document.getElementById('lbl_x').innerText = x.toFixed(2) + 'm';
+            document.getElementById('lbl_y').innerText = Math.abs(y).toFixed(2) + 'm';
+            document.getElementById('lbl_z').innerText = z.toFixed(2) + 'm';
+
+            // --- C++ IK MATH EXECUTED IN JS ---
+            const hip_sign = isLeft ? 1.0 : -1.0;
+            
+            let r2d = Math.sqrt(y*y + z*z);
+            if (r2d < HIP_OFFSET) r2d = HIP_OFFSET + 0.001;
+            
+            let inner = Math.max(0.0, r2d*r2d - HIP_OFFSET*HIP_OFFSET);
+            const L2_proj = Math.sqrt(inner); 
+            
+            const a_hip = Math.atan2(y, -z) - hip_sign * Math.atan2(HIP_OFFSET, L2_proj);
+
+            let leg_distance = Math.sqrt(x*x + L2_proj*L2_proj);
+            leg_distance = Math.max(0.01, Math.min(leg_distance, THIGH_LEN + CALF_LEN - 0.001));
+
+            const cos_calf = (leg_distance*leg_distance - THIGH_LEN*THIGH_LEN - CALF_LEN*CALF_LEN) / (2.0 * THIGH_LEN * CALF_LEN);
+            const a_calf = -Math.acos(Math.max(-1.0, Math.min(cos_calf, 1.0)));
+
+            const alpha = Math.atan2(x, L2_proj);
+            const cos_beta = (THIGH_LEN*THIGH_LEN + leg_distance*leg_distance - CALF_LEN*CALF_LEN) / (2.0 * THIGH_LEN * leg_distance);
+            const beta = Math.acos(Math.max(-1.0, Math.min(cos_beta, 1.0)));
+            const a_thigh = beta - alpha;
+
+            document.getElementById('out_hip').innerText = a_hip.toFixed(3);
+            document.getElementById('out_thigh').innerText = a_thigh.toFixed(3);
+            document.getElementById('out_calf').innerText = a_calf.toFixed(3);
+
+            // --- 1. RENDER YZ PLANE (Front View) ---
+            ctxYZ.clearRect(0, 0, canvasYZ.width, canvasYZ.height);
+            const cxYZ = canvasYZ.width / 2;
+            const cyYZ = 40;
+            const scaleYZ = 700;
+
+            // Draw Base Axes
+            ctxYZ.setLineDash([5, 5]);
+            drawLine(ctxYZ, cxYZ, cyYZ, cxYZ, canvasYZ.height, '#999', 2); // Vertical
+            drawLine(ctxYZ, cxYZ - 150, cyYZ, cxYZ + 150, cyYZ, '#999', 2); // Horizontal
+            ctxYZ.setLineDash([]);
+
+            // Forward Kinematics purely for precise rendering of the right triangle
+            const pivotY_m = (isLeft ? HIP_OFFSET : -HIP_OFFSET) * Math.cos(a_hip);
+            const pivotZ_m = (isLeft ? HIP_OFFSET : -HIP_OFFSET) * Math.sin(a_hip);
+
+            const p0 = { x: cxYZ, y: cyYZ }; // Origin
+            const p1 = { x: cxYZ + pivotY_m * scaleYZ, y: cyYZ - pivotZ_m * scaleYZ }; // Pivot
+            const p2 = { x: cxYZ + y * scaleYZ, y: cyYZ - z * scaleYZ }; // Foot
+
+            // Draw Right Triangle
+            drawLine(ctxYZ, p0.x, p0.y, p1.x, p1.y, '#681da8', 5); // L1 (Hip Offset)
+            drawLine(ctxYZ, p1.x, p1.y, p2.x, p2.y, '#1558d6', 5); // L2_proj
+            drawLine(ctxYZ, p0.x, p0.y, p2.x, p2.y, '#666', 3, true); // r2d
+
+            // Draw Right Angle Box at Pivot
+            const size = 15;
+            const ang1 = Math.atan2(p0.y - p1.y, p0.x - p1.x);
+            const ang2 = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+            ctxYZ.beginPath();
+            ctxYZ.moveTo(p1.x + size * Math.cos(ang1), p1.y + size * Math.sin(ang1));
+            ctxYZ.lineTo(p1.x + size * Math.cos(ang1) + size * Math.cos(ang2), p1.y + size * Math.sin(ang1) + size * Math.sin(ang2));
+            ctxYZ.lineTo(p1.x + size * Math.cos(ang2), p1.y + size * Math.sin(ang2));
+            ctxYZ.strokeStyle = '#333'; ctxYZ.lineWidth = 2; ctxYZ.stroke();
+
+            // Clear Labels with explicit forced offsets
+            const sign = isLeft ? 1 : -1;
+            drawLabel(ctxYZ, 'L1 (Offset)', (p0.x + p1.x)/2 + 40*sign, (p0.y + p1.y)/2 - 20, '#681da8', '#f3ebf7');
+            drawLabel(ctxYZ, 'L2_proj', (p1.x + p2.x)/2 - 50*sign, (p1.y + p2.y)/2, '#1558d6', '#e6f0ff');
+            drawLabel(ctxYZ, 'r2d', (p0.x + p2.x)/2 + 40*sign, (p0.y + p2.y)/2, '#666', '#f4f4f4');
+
+            // Joints
+            drawCircle(ctxYZ, p0.x, p0.y, 6, '#333'); 
+            drawLabel(ctxYZ, 'Origin', p0.x, p0.y - 25, '#333', '#fff');
+            
+            drawCircle(ctxYZ, p1.x, p1.y, 6, '#681da8'); 
+            drawLabel(ctxYZ, 'Thigh Pivot', p1.x + 50*sign, p1.y, '#681da8', '#fff');
+
+            drawCircle(ctxYZ, p2.x, p2.y, 6, '#444');
+            drawLabel(ctxYZ, 'Foot (y, z)', p2.x, p2.y + 25, '#444', '#fff');
+
+            // --- 2. RENDER XZ PLANE (Leg Plane) ---
+            ctxXZ.clearRect(0, 0, canvasXZ.width, canvasXZ.height);
+            const cxXZ = canvasXZ.width / 2;
+            const cyXZ = 60; // Pushed down to fit arcs
+            const scaleXZ = 650;
+
+            const pPivot = { x: cxXZ, y: cyXZ };
+            const pKnee = { x: cxXZ + (-THIGH_LEN * Math.sin(a_thigh)) * scaleXZ, y: cyXZ + (THIGH_LEN * Math.cos(a_thigh)) * scaleXZ };
+            const pFoot = { x: cxXZ + x * scaleXZ, y: cyXZ + L2_proj * scaleXZ };
+
+            // Draw Vertical Reference Line
+            ctxXZ.setLineDash([5, 5]);
+            drawLine(ctxXZ, pPivot.x, pPivot.y, pPivot.x, canvasXZ.height - 20, '#999', 2);
+            ctxXZ.setLineDash([]);
+            drawLabel(ctxXZ, 'Virtual Z (Gravity)', pPivot.x, canvasXZ.height - 15, '#999', '#fff');
+
+            // Draw Triangle Legs
+            drawLine(ctxXZ, pPivot.x, pPivot.y, pFoot.x, pFoot.y, '#666', 3, true); // leg_dist
+            drawLine(ctxXZ, pPivot.x, pPivot.y, pKnee.x, pKnee.y, '#d85900', 6); // L2
+            drawLine(ctxXZ, pKnee.x, pKnee.y, pFoot.x, pFoot.y, '#046e00', 6); // L3
+
+            // Thigh Extension for Calf Angle
+            const extLen = 80;
+            const dKneeX = pKnee.x - pPivot.x;
+            const dKneeZ = pKnee.y - pPivot.y;
+            const kneeLen = Math.sqrt(dKneeX*dKneeX + dKneeZ*dKneeZ);
+            const pExt = { x: pKnee.x + (dKneeX/kneeLen)*extLen, y: pKnee.y + (dKneeZ/kneeLen)*extLen };
+            drawLine(ctxXZ, pKnee.x, pKnee.y, pExt.x, pExt.y, '#d85900', 2, true);
+
+            // Clean Non-Overlapping Labels
+            // Thigh and Calf forced LEFT (since knee always bends backwards)
+            drawLabel(ctxXZ, 'L2 (Thigh)', (pPivot.x + pKnee.x)/2 - 55, (pPivot.y + pKnee.y)/2, '#d85900', '#fff5eb');
+            drawLabel(ctxXZ, 'L3 (Calf)', (pKnee.x + pFoot.x)/2 - 55, (pKnee.y + pFoot.y)/2, '#046e00', '#ebf7eb');
+            // leg_distance forced RIGHT
+            drawLabel(ctxXZ, 'leg_distance', (pPivot.x + pFoot.x)/2 + 65, (pPivot.y + pFoot.y)/2, '#666', '#f4f4f4');
+
+            // --- DRAW ARCS ---
+            const angVert = Math.PI / 2; // Straight down
+            const angFoot = Math.atan2(pFoot.y - pPivot.y, pFoot.x - pPivot.x);
+            const angKnee = Math.atan2(pKnee.y - pPivot.y, pKnee.x - pPivot.x);
+
+            // Alpha (Vertical to leg_dist)
+            ctxXZ.beginPath();
+            ctxXZ.arc(pPivot.x, pPivot.y, 80, Math.min(angVert, angFoot), Math.max(angVert, angFoot));
+            ctxXZ.strokeStyle = '#1558d6'; ctxXZ.lineWidth = 2; ctxXZ.stroke();
+            const alphaMid = (angVert + angFoot) / 2;
+            drawLabel(ctxXZ, '\u03B1', pPivot.x + 90 * Math.cos(alphaMid), pPivot.y + 90 * Math.sin(alphaMid), '#1558d6', '#e6f0ff');
+
+            // Beta (leg_dist to Thigh)
+            ctxXZ.beginPath();
+            ctxXZ.arc(pPivot.x, pPivot.y, 130, Math.min(angFoot, angKnee), Math.max(angFoot, angKnee));
+            ctxXZ.strokeStyle = '#d63384'; ctxXZ.lineWidth = 2; ctxXZ.stroke();
+            const betaMid = (angFoot + angKnee) / 2;
+            drawLabel(ctxXZ, '\u03B2', pPivot.x + 145 * Math.cos(betaMid), pPivot.y + 145 * Math.sin(betaMid), '#d63384', '#fce8f3');
+
+            // Theta Calf
+            const angCalf = Math.atan2(pFoot.y - pKnee.y, pFoot.x - pKnee.x);
+            ctxXZ.beginPath();
+            ctxXZ.arc(pKnee.x, pKnee.y, 50, Math.min(angKnee, angCalf), Math.max(angKnee, angCalf));
+            ctxXZ.strokeStyle = '#046e00'; ctxXZ.lineWidth = 2; ctxXZ.stroke();
+            const calfMid = (angKnee + angCalf) / 2;
+            drawLabel(ctxXZ, '\u03B8_calf', pKnee.x + 75 * Math.cos(calfMid), pKnee.y + 75 * Math.sin(calfMid), '#046e00', '#ebf7eb');
+
+            // Joints
+            drawCircle(ctxXZ, pPivot.x, pPivot.y, 6, '#333'); 
+            drawLabel(ctxXZ, 'Thigh Pivot', pPivot.x, pPivot.y - 25, '#333', '#fff');
+            
+            drawCircle(ctxXZ, pKnee.x, pKnee.y, 6, '#d85900'); 
+            drawLabel(ctxXZ, 'Knee', pKnee.x - 35, pKnee.y + 15, '#d85900', '#fff');
+
+            drawCircle(ctxXZ, pFoot.x, pFoot.y, 6, '#444');
+            drawLabel(ctxXZ, `Foot (X=${x.toFixed(2)}, Z'=${L2_proj.toFixed(2)})`, pFoot.x, pFoot.y + 25, '#444', '#fff');
+        }
+
+        // Init
+        setTimeout(resizeCanvas, 100);
+    </script>
+</body>
+</html>

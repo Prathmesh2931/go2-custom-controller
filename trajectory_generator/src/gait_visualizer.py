@@ -1,179 +1,188 @@
-import numpy as np
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Float64MultiArray
+from sensor_msgs.msg import JointState
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from matplotlib.widgets import Slider
+import numpy as np
+import threading
+from collections import deque
 
-# --- ROBOT KINEMATICS ---
-HIP_X = 0.1934    # Front/Back offset from CoM
-HIP_Y = 0.14      # Left/Right offset (Wide Stance)
-STANCE_Z = -0.28  # Target stance height
-LIFT_H = 0.08     # Swing clearance
-
-# --- SETUP PLOTS ---
-fig = plt.figure(figsize=(18, 7))
-fig.canvas.manager.set_window_title('Go2 Interactive Gait & Odometry Kinematics')
-
-# Subplot 1: Top-Down (X-Y) View (Local Robot Frame)
-ax_top = plt.subplot(1, 3, 1)
-ax_top.set_title("Local Footprint (X-Y)", fontweight='bold')
-ax_top.set_xlim(-0.4, 0.4)
-ax_top.set_ylim(-0.3, 0.3)
-ax_top.set_aspect('equal')
-ax_top.grid(True, linestyle='--', alpha=0.6)
-ax_top.axhline(0, color='black', lw=1, alpha=0.3)
-ax_top.axvline(0, color='black', lw=1, alpha=0.3)
-com_marker_top = ax_top.scatter([0], [0], color='black', s=100, marker='X', label='CoM')
-
-# Subplot 2: Side (X-Z) View for Left Front (LF)
-ax_side = plt.subplot(1, 3, 2)
-ax_side.set_title("LF Swing Arc (X-Z)", fontweight='bold')
-ax_side.set_xlim(0.0, 0.4)
-ax_side.set_ylim(-0.4, -0.1)
-ax_side.set_aspect('equal')
-ax_side.grid(True, linestyle='--', alpha=0.6)
-ax_side.axhline(STANCE_Z, color='saddlebrown', lw=4, label='Ground')
-
-# Subplot 3: Global Body Path (World Frame)
-ax_odom = plt.subplot(1, 3, 3)
-ax_odom.set_title("Global Body Path (Odometry)", fontweight='bold')
-ax_odom.set_aspect('equal')
-ax_odom.grid(True, linestyle='--', alpha=0.6)
-
-# Visual markers for feet (Local)
-colors = ['dodgerblue', 'crimson', 'crimson', 'dodgerblue']
-labels = ['LF (Diag 1)', 'RF (Diag 2)', 'LH (Diag 2)', 'RH (Diag 1)']
-foot_scatters_top = []
-for i in range(4):
-    scat = ax_top.scatter([], [], color=colors[i], s=150, label=labels[i])
-    foot_scatters_top.append(scat)
-
-lf_arc_line, = ax_side.plot([], [], 'o-', color='dodgerblue', lw=3, markersize=10)
-ax_top.legend(loc='upper right', fontsize=8)
-
-# Visual markers for Global Odometry
-path_line, = ax_odom.plot([], [], 'k-', lw=2, alpha=0.5, label='Trajectory')
-body_marker, = ax_odom.plot([], [], 'ro', markersize=8, label='Robot Base')
-heading_line, = ax_odom.plot([], [], 'r-', lw=3)
-ax_odom.legend(loc='upper left', fontsize=8)
-
-# Diagnostics Text
-text_diag = fig.text(0.02, 0.82, "", fontsize=10, fontfamily='monospace', bbox=dict(facecolor='white', alpha=0.8))
-
-# --- SLIDERS FOR CMD_VEL ---
-ax_vx = plt.axes([0.15, 0.1, 0.65, 0.03])
-ax_wz = plt.axes([0.15, 0.05, 0.65, 0.03])
-slider_vx = Slider(ax_vx, 'Forward (Vx)', -0.5, 0.5, valinit=0.0)
-slider_wz = Slider(ax_wz, 'Yaw (Wz)', -1.0, 1.0, valinit=0.0)
-
-# State Variables
-phase = 0.0
-global_x = 0.0
-global_y = 0.0
-global_yaw = 0.0
-path_history_x = []
-path_history_y = []
-DT = 0.02  # 20ms update rate
-
-def update(frame):
-    global phase, global_x, global_y, global_yaw
-    
-    vx = slider_vx.val
-    wz = slider_wz.val
-    speed = np.sqrt(vx**2 + wz**2)
-    is_moving = speed > 0.05
-    
-    # 1. UPDATE GLOBAL ODOMETRY KINEMATICS
-    global_yaw += wz * DT
-    
-    # Only integrate position if actually moving
-    if is_moving:
-        global_x += (vx * np.cos(global_yaw)) * DT
-        global_y += (vx * np.sin(global_yaw)) * DT
+class TrajectoryVisualizer(Node):
+    def __init__(self):
+        super().__init__('gait_visualizer')
         
-    path_history_x.append(global_x)
-    path_history_y.append(global_y)
-    
-    # Keep trail memory manageable
-    if len(path_history_x) > 300:
-        path_history_x.pop(0)
-        path_history_y.pop(0)
-    
-    # 2. UPDATE PHASE CLOCK
-    if is_moving:
-        phase += 0.02 * 1.5  # Cadence
-        if phase >= 1.0: phase -= 1.0
-    else:
-        phase = 0.0 # 4-LEG IDLE OVERRIDE
-        
-    contacts = [1, 1, 1, 1]
-    xs, ys, zs = [0]*4, [0]*4, [0]*4
-    
-    # 3. CALCULATE DYNAMIC FOOT PLACEMENTS (LOCAL FRAME)
-    for i in range(4):
-        # Base Hip Positions
-        rx = HIP_X if i < 2 else -HIP_X
-        ry = HIP_Y if i % 2 == 0 else -HIP_Y
-        
-        if is_moving:
-            # DIFFERENTIAL KINEMATICS FOR YAW
-            # Velocity of foot = V_base + Angular_Vel x Radius
-            foot_vx = vx - wz * ry  # Outer legs move faster during turn
-            foot_vy = wz * rx       # Front/Back legs sweep sideways during turn
+        # Subscriptions
+        self.sub_target = self.create_subscription(
+            Float64MultiArray, '/gait/planned_positions', self.target_cb, 10)
+        self.sub_actual = self.create_subscription(
+            JointState, '/joint_states', self.actual_cb, 10)
             
-            step_x = np.clip(foot_vx * 0.4, -0.15, 0.15)
-            step_y = np.clip(foot_vy * 0.4, -0.08, 0.08)
-            
-            p = phase if (i == 0 or i == 3) else ((phase + 0.5) % 1.0)
-            
-            if p < 0.4:
-                contacts[i] = 0 # SWING
-                t = p / 0.4
-                xs[i] = rx - step_x/2.0 + step_x * (0.5 - 0.5*np.cos(np.pi * t))
-                ys[i] = ry - step_y/2.0 + step_y * (0.5 - 0.5*np.cos(np.pi * t))
-                zs[i] = STANCE_Z + LIFT_H * np.sin(np.pi * t)
-            else:
-                contacts[i] = 1 # STANCE
-                t = (p - 0.4) / 0.6
-                xs[i] = rx + step_x/2.0 - step_x * t
-                ys[i] = ry + step_y/2.0 - step_y * t
-                zs[i] = STANCE_Z
-        else:
-            # IDLE: Lock to nominal positions on the ground
-            contacts[i] = 1
-            xs[i], ys[i], zs[i] = rx, ry, STANCE_Z
-            
-    # 4. UPDATE PLOT VISUALS
-    for i in range(4):
-        foot_scatters_top[i].set_offsets(np.c_[xs[i], ys[i]])
-        # Fade out legs that are in the air (Swing)
-        foot_scatters_top[i].set_alpha(1.0 if contacts[i] == 1 else 0.3)
-        
-    lf_arc_line.set_data([HIP_X, xs[0]], [0, zs[0]])
-    lf_arc_line.set_alpha(1.0 if contacts[0] == 1 else 0.3)
-    
-    # Update Odometry Plot
-    path_line.set_data(path_history_x, path_history_y)
-    body_marker.set_data([global_x], [global_y])
-    # Draw heading vector (Length 0.2m for visibility)
-    hx = global_x + 0.2 * np.cos(global_yaw)
-    hy = global_y + 0.2 * np.sin(global_yaw)
-    heading_line.set_data([global_x, hx], [global_y, hy])
-    
-    # Dynamic following camera (1.5m radius around robot)
-    ax_odom.set_xlim(global_x - 1.5, global_x + 1.5)
-    ax_odom.set_ylim(global_y - 1.5, global_y + 1.5)
-    
-    # 5. UPDATE DIAGNOSTIC TEXT
-    diag_str = f"GLOBAL PHASE: {phase:.2f} | IS_MOVING: {is_moving}\n"
-    diag_str += f"GLOBAL POS  : X={global_x:+.2f}, Y={global_y:+.2f}, YAW={np.degrees(global_yaw):+.0f} deg\n\n"
-    diag_str += "CONTACT ESTIMATION (0=Swing, 1=Stance):\n"
-    diag_str += f"LF (Diag 1) : {contacts[0]}  |  RF (Diag 2) : {contacts[1]}\n"
-    diag_str += f"LH (Diag 2) : {contacts[2]}  |  RH (Diag 1) : {contacts[3]}"
-    
-    text_diag.set_text(diag_str)
-    
-    return foot_scatters_top + [lf_arc_line, path_line, body_marker, heading_line, text_diag]
+        # Go2 Kinematics Constants
+        self.HIP_OFFSET = 0.0955
+        self.THIGH_LEN = 0.213
+        self.CALF_LEN = 0.213
+        self.hip_offset_x = [0.1934, 0.1934, -0.1934, -0.1934]
 
-ani = animation.FuncAnimation(fig, update, frames=200, interval=20, blit=False)
-plt.subplots_adjust(bottom=0.25, left=0.05, right=0.98)
-plt.show()
+        # Joint Names
+        self.joint_names = [
+            "lf_hip_joint", "lf_upper_leg_joint", "lf_lower_leg_joint",
+            "rf_hip_joint", "rf_upper_leg_joint", "rf_lower_leg_joint",
+            "lh_hip_joint", "lh_upper_leg_joint", "lh_lower_leg_joint",
+            "rh_hip_joint", "rh_upper_leg_joint", "rh_lower_leg_joint"
+        ]
+
+        # Trajectory History (250Hz * 60 seconds = 15000 points)
+        hist_len = 15000
+        
+        # LF (Leg 0)
+        self.target_x_lf = deque(maxlen=hist_len)
+        self.target_z_lf = deque(maxlen=hist_len)
+        self.actual_x_lf = deque(maxlen=hist_len)
+        self.actual_z_lf = deque(maxlen=hist_len)
+        
+        # RH (Leg 3)
+        self.target_x_rh = deque(maxlen=hist_len)
+        self.target_z_rh = deque(maxlen=hist_len)
+        self.actual_x_rh = deque(maxlen=hist_len)
+        self.actual_z_rh = deque(maxlen=hist_len)
+
+    def calc_fk(self, q1, q2, q3, leg_idx):
+        l1 = self.HIP_OFFSET if (leg_idx == 0 or leg_idx == 2) else -self.HIP_OFFSET
+        l2 = self.THIGH_LEN
+        l3 = self.CALF_LEN
+
+        s1, c1 = np.sin(q1), np.cos(q1)
+        s2, c2 = np.sin(q2), np.cos(q2)
+        s23, c23 = np.sin(q2 + q3), np.cos(q2 + q3)
+
+        # X/Z relative to hip
+        x = -l2 * s2 - l3 * s23
+        z = l1 * s1 - c1 * (l2 * c2 + l3 * c23)
+
+        # Transform to world relative frame
+        x_world = x + self.hip_offset_x[leg_idx]
+        return x_world, z
+
+    def target_cb(self, msg):
+        if len(msg.data) >= 12:
+            # LF (Index 0)
+            tx, tz = self.calc_fk(msg.data[0], msg.data[1], msg.data[2], 0)
+            self.target_x_lf.append(tx)
+            self.target_z_lf.append(tz)
+            
+            # RH (Index 3)
+            tx, tz = self.calc_fk(msg.data[9], msg.data[10], msg.data[11], 3)
+            self.target_x_rh.append(tx)
+            self.target_z_rh.append(tz)
+
+    def actual_cb(self, msg):
+        if len(msg.name) >= 12:
+            try:
+                # Extract indices safely in case /joint_states scrambles the order
+                lf_q1 = msg.position[msg.name.index("lf_hip_joint")]
+                lf_q2 = msg.position[msg.name.index("lf_upper_leg_joint")]
+                lf_q3 = msg.position[msg.name.index("lf_lower_leg_joint")]
+                
+                rh_q1 = msg.position[msg.name.index("rh_hip_joint")]
+                rh_q2 = msg.position[msg.name.index("rh_upper_leg_joint")]
+                rh_q3 = msg.position[msg.name.index("rh_lower_leg_joint")]
+
+                ax, az = self.calc_fk(lf_q1, lf_q2, lf_q3, 0)
+                self.actual_x_lf.append(ax)
+                self.actual_z_lf.append(az)
+                
+                ax, az = self.calc_fk(rh_q1, rh_q2, rh_q3, 3)
+                self.actual_x_rh.append(ax)
+                self.actual_z_rh.append(az)
+            except ValueError:
+                pass # Still initializing
+
+def run_ros(node):
+    rclpy.spin(node)
+
+def main():
+    rclpy.init()
+    node = TrajectoryVisualizer()
+    
+    # Run ROS in a background thread so Matplotlib can own the main thread
+    ros_thread = threading.Thread(target=run_ros, args=(node,), daemon=True)
+    ros_thread.start()
+
+    # --- Matplotlib Setup ---
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    fig.canvas.manager.set_window_title('Go2 Cartesian PD Tracking Analyzer')
+
+    # Formatting axes
+    for ax, title in zip([ax1, ax2], ['Left Front (LF)', 'Right Hind (RH)']):
+        ax.set_title(title, fontweight='bold')
+        ax.set_xlabel('X Position (m)')
+        ax.set_ylabel('Z Position (m)')
+        ax.grid(True, linestyle='--', alpha=0.6)
+        # Expanded Z-axis limits in case the physical robot sags heavily
+        ax.set_ylim(-0.45, -0.05)  
+        
+    # Expanded X-axis limits to prevent clipping
+    ax1.set_xlim(-0.05, 0.45)   # LF Hip is at +0.1934
+    ax2.set_xlim(-0.45, 0.05)  # RH Hip is at -0.1934
+
+    # Target lines (Dashed Blue)
+    line_target_lf, = ax1.plot([], [], 'b--', lw=2, label='Target Orbit')
+    line_target_rh, = ax2.plot([], [], 'b--', lw=2, label='Target Orbit')
+    
+    # Actual lines (Solid Red)
+    line_actual_lf, = ax1.plot([], [], 'r-', lw=2.5, label='Actual Orbit')
+    line_actual_rh, = ax2.plot([], [], 'r-', lw=2.5, label='Actual Orbit')
+
+    # Current position dots
+    dot_target_lf, = ax1.plot([], [], 'bo', markersize=8)
+    dot_actual_lf, = ax1.plot([], [], 'ro', markersize=8)
+    dot_target_rh, = ax2.plot([], [], 'bo', markersize=8)
+    dot_actual_rh, = ax2.plot([], [], 'ro', markersize=8)
+
+    ax1.legend(loc='upper right')
+    ax2.legend(loc='upper right')
+
+    def animate(i):
+        # Update LF
+        if len(node.target_x_lf) > 0 and len(node.actual_x_lf) > 0:
+            # Thread-safe extraction to prevent broadcast shape errors
+            t_len_lf = min(len(node.target_x_lf), len(node.target_z_lf))
+            a_len_lf = min(len(node.actual_x_lf), len(node.actual_z_lf))
+            
+            tx_lf = list(node.target_x_lf)[-t_len_lf:]
+            tz_lf = list(node.target_z_lf)[-t_len_lf:]
+            ax_lf = list(node.actual_x_lf)[-a_len_lf:]
+            az_lf = list(node.actual_z_lf)[-a_len_lf:]
+
+            line_target_lf.set_data(tx_lf, tz_lf)
+            dot_target_lf.set_data([tx_lf[-1]], [tz_lf[-1]])
+            
+            line_actual_lf.set_data(ax_lf, az_lf)
+            dot_actual_lf.set_data([ax_lf[-1]], [az_lf[-1]])
+
+        # Update RH
+        if len(node.target_x_rh) > 0 and len(node.actual_x_rh) > 0:
+            t_len_rh = min(len(node.target_x_rh), len(node.target_z_rh))
+            a_len_rh = min(len(node.actual_x_rh), len(node.actual_z_rh))
+            
+            tx_rh = list(node.target_x_rh)[-t_len_rh:]
+            tz_rh = list(node.target_z_rh)[-t_len_rh:]
+            ax_rh = list(node.actual_x_rh)[-a_len_rh:]
+            az_rh = list(node.actual_z_rh)[-a_len_rh:]
+
+            line_target_rh.set_data(tx_rh, tz_rh)
+            dot_target_rh.set_data([tx_rh[-1]], [tz_rh[-1]])
+            
+            line_actual_rh.set_data(ax_rh, az_rh)
+            dot_actual_rh.set_data([ax_rh[-1]], [az_rh[-1]])
+
+        return line_target_lf, line_actual_lf, dot_target_lf, dot_actual_lf, \
+               line_target_rh, line_actual_rh, dot_target_rh, dot_actual_rh
+
+    ani = animation.FuncAnimation(fig, animate, interval=20, blit=True)
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == '__main__':
+    main()

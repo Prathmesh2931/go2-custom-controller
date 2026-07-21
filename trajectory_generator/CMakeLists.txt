@@ -14,6 +14,13 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(eigen3_cmake_module REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(go2_mpc_controller REQUIRED)
+find_package(ament_index_cpp REQUIRED)
+find_package(pinocchio REQUIRED)
+find_package(gazebo_msgs REQUIRED)
+
+
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -49,6 +56,10 @@ ament_target_dependencies(mpc_trajectory_gen rclcpp trajectory_msgs sensor_msgs 
 add_executable(trot_gait src/trot_gait.cpp)
 ament_target_dependencies(trot_gait rclcpp trajectory_msgs sensor_msgs geometry_msgs nav_msgs)
 
+add_executable(contact_estimator src/contact_estimator.cpp)
+ament_target_dependencies(contact_estimator rclcpp trajectory_msgs sensor_msgs geometry_msgs nav_msgs tf2 go2_mpc_controller ament_index_cpp gazebo_msgs)
+target_link_libraries(contact_estimator Eigen3::Eigen pinocchio::pinocchio)
+
 install(
   DIRECTORY include/ src/
   DESTINATION share/${PROJECT_NAME}
@@ -59,6 +70,7 @@ install(TARGETS
   phase_generator
   cmd_control_go2
   velocity_estimator
+  contact_estimator
   trot_gait
   mpc_trajectory_gen
   jacobian_validator

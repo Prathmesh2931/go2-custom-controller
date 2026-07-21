@@ -9,33 +9,10 @@
 #include <iomanip>
 #include <mutex>
 #include <Eigen/Dense>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
-// --- NATIVE MATH INJECTION ---
-// Using the exact Go2 physics math provided to bypass CMake dependencies!
-namespace go2_physics {
-    const double HIP_OFFSET = 0.0955;
-    const double THIGH_LEN = 0.213;
-    const double CALF_LEN = 0.213;
-
-    Eigen::Vector3d calcFootPosition(double q1, double q2, double q3, int leg_index) {
-        double l1 = (leg_index == 0 || leg_index == 2) ? HIP_OFFSET : -HIP_OFFSET;
-        double l2 = THIGH_LEN;
-        double l3 = CALF_LEN;
-
-        double s1 = std::sin(q1);
-        double c1 = std::cos(q1);
-        double s2 = std::sin(q2);
-        double c2 = std::cos(q2);
-        double s23 = std::sin(q2 + q3);
-        double c23 = std::cos(q2 + q3);
-
-        Eigen::Vector3d pos;
-        pos(0) = -l2 * s2 - l3 * s23;
-        pos(1) = l1 * c1 + s1 * (l2 * c2 + l3 * c23);
-        pos(2) = l1 * s1 - c1 * (l2 * c2 + l3 * c23);
-        return pos;
-    }
-}
+// --- SINGLE SOURCE OF TRUTH ---
+#include "go2_mpc_controller/robot_model.hpp"
 
 class PurePdTracker : public rclcpp::Node {
 public:
@@ -67,7 +44,13 @@ public:
             "rh_hip_joint", "rh_upper_leg_joint", "rh_lower_leg_joint"
         };
 
-        RCLCPP_INFO(this->get_logger(), "LAYER 1: ZERO-LAG TRACKER (WITH REAR MASS BIAS).");
+        try {
+            std::string urdf_path = ament_index_cpp::get_package_share_directory("go2_description") + "/urdf/go2_description.urdf";
+            go2_physics::RobotModel::initialize(urdf_path);
+            RCLCPP_INFO(this->get_logger(), "LAYER 1 ONLINE: ZERO-LAG TRACKER (STABLE DAMPING).");
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "URDF LOAD FAILED! %s", e.what());
+        }
     }
 
 private:
@@ -88,10 +71,6 @@ private:
     std::vector<int> current_contacts_{1, 1, 1, 1}; 
     std::vector<double> start_pos_;
     std::vector<double> prev_target_ = std::vector<double>(12, 0.0);
-    std::vector<double> filtered_vel_ = std::vector<double>(12, 0.0);
-
-    const double hip_offset_x_[4] = { 0.1934,  0.1934, -0.1934, -0.1934};
-    const double hip_offset_y_[4] = { 0.0465, -0.0465,  0.0465, -0.0465};
 
     rclcpp::Time start_time_;
     bool first_tick_ = true;
@@ -165,6 +144,7 @@ private:
             contacts = current_contacts_;
         }
 
+        // Your exact 2-second safe spawn ramp
         double ramp = std::clamp(elapsed / 2.0, 0.0, 1.0); 
         
         std_msgs::msg::Float64MultiArray effort_msg;
@@ -173,45 +153,43 @@ private:
         std::vector<double> current_pd_tau(12, 0.0);
 
         for (int i = 0; i < 12; ++i) {
+            // YOUR REQUEST: Absolute Zero-Lag Velocity (No filters)
             double vel = current_vel[i];
 
-            // 250Hz instant passthrough (no filter lag!)
             double gait_target = target_q[i]; 
-
             double active_target = start_pos_[i] + (gait_target - start_pos_[i]) * ramp;
             double error = active_target - current_pos[i];
 
-            // --- THE REAR MASS BIAS ---
-            // Legs 2 & 3 (Rear) get a 40% boost in stiffness and gravity comp
-            // to counteract the heavy battery pack and lift the rear up to Z=-0.28m!
+            // Rear mass bias to support the heavy battery
             int leg_idx = i / 3;
             double rear_weight_bias = (leg_idx >= 2) ? 1.2 : 1.0;
 
             double kp, kd;
             if (i % 3 == 0) {
-                kp = 65.0 * ramp;
-                kd = 0.5  * ramp;
+                kp = 95.0 * ramp;
+                kd = 1.0  * ramp; // Raised slightly to damp hip shakes
             } else if (contacts[leg_idx] == 1) {
-                // Stance
-                kp = 55.0 * rear_weight_bias * ramp;
-                kd = 0.5  * ramp;
+                kp = 60.0 * rear_weight_bias * ramp;
+                kd = 0.8  * ramp; // CRITICAL DAMPING: Stops the calf from vibrating
             } else {
-                // Swing
-                kp = 55.0 * ramp;
-                kd = 0.4  * ramp;
+                kp = 50.0 * ramp;
+                kd = 0.8  * ramp;
             }
 
             double tau = (kp * error) - (kd * vel);
 
-            // if (i % 3 == 0) {
-            //     if (leg_idx == 0 || leg_idx == 2) tau -= 9.0 * ramp; 
-            //     else                              tau += 9.0 * ramp;
-            // }
+            // ANTI-SPLITS FIX: Pull the hips inward gently so the Kp spring doesn't fight the whole chassis weight
+            if (i % 3 == 0) {
+                if (leg_idx == 0 || leg_idx == 2) tau -= 3.0 * ramp; // Left legs pull inward
+                else                              tau += 3.0 * ramp; // Right legs pull inward
+            }
 
-            // Gravity Comp (boosted for the heavy rear!)
+            // --- MASSIVE GRAVITY FEEDFORWARD BOOST ---
+            // We increase the baseline torque so the motors carry the 15kg chassis natively.
+            // This eliminates the 3cm Z-sag without causing high-frequency PD shaking!
             if (contacts[leg_idx] == 1) {
-                if (i % 3 == 1) tau += -1.5 * rear_weight_bias * ramp;   
-                if (i % 3 == 2) tau +=  4.0 * rear_weight_bias * ramp;   
+                if (i % 3 == 1) tau += -3.0 * rear_weight_bias * ramp;   
+                if (i % 3 == 2) tau +=  4.5 * rear_weight_bias * ramp;   
             } else {
                 if (i % 3 == 1) tau += -0.5 * ramp;  
                 if (i % 3 == 2) tau +=  1.5 * ramp;
@@ -231,13 +209,17 @@ private:
             
             std::cout << "=== 3D CARTESIAN ERROR (WORLD FRAME) ===\n";
             for (int leg = 0; leg < 4; ++leg) {
-                Eigen::Vector3d actual_fk = go2_physics::calcFootPosition(
-                    current_pos[leg*3], current_pos[leg*3+1], current_pos[leg*3+2], leg);
-                actual_fk(0) += hip_offset_x_[leg];
+                go2_physics::Leg leg_enum = static_cast<go2_physics::Leg>(leg);
+                Eigen::Vector3d hip_off = go2_physics::RobotModel::getHipOffset(leg_enum);
                 
-                Eigen::Vector3d target_fk = go2_physics::calcFootPosition(
-                    target_q[leg*3], target_q[leg*3+1], target_q[leg*3+2], leg);
-                target_fk(0) += hip_offset_x_[leg];
+                // Properly integrated RobotModel
+                Eigen::Vector3d actual_fk = go2_physics::RobotModel::calcForwardKinematics(
+                    current_pos[leg*3], current_pos[leg*3+1], current_pos[leg*3+2], leg_enum);
+                actual_fk(0) += hip_off(0);
+                
+                Eigen::Vector3d target_fk = go2_physics::RobotModel::calcForwardKinematics(
+                    target_q[leg*3], target_q[leg*3+1], target_q[leg*3+2], leg_enum);
+                target_fk(0) += hip_off(0);
                 
                 double err_x = target_fk(0) - actual_fk(0);
                 double err_z = target_fk(2) - actual_fk(2);
@@ -266,6 +248,30 @@ private:
                           << std::setw(10) << (target_q[j] - current_pos[j])
                           << std::setw(12) << current_pd_tau[j] << "\n";
             }
+
+            go2_physics::Leg val_leg = go2_physics::Leg::LF;
+            try {
+                Eigen::Matrix3d M = go2_physics::RobotModel::calcLegMassMatrix(
+                    current_pos[0], current_pos[1], current_pos[2], val_leg);
+                
+                Eigen::Vector3d g = go2_physics::RobotModel::calcLegGravity(
+                    current_pos[0], current_pos[1], current_pos[2], val_leg);
+
+                std::cout << "\n--- PINOCCHIO DYNAMICS VALIDATION (LF LEG) ---\n";
+                std::cout << "Gravity Torque g(q) required for LEGS ONLY (No chassis mass):\n";
+                std::cout << "  Hip:   " << std::setw(6) << g(0) << " Nm\n";
+                std::cout << "  Thigh: " << std::setw(6) << g(1) << " Nm (vs Manual PD 1.5 Nm)\n";
+                std::cout << "  Calf:  " << std::setw(6) << g(2) << " Nm (vs Manual PD 4.0 Nm)\n";
+                
+                std::cout << "\nMass Matrix M(q) Diagonal (Inertia):\n";
+                std::cout << "  M_11 (Hip):   " << M(0,0) << "\n";
+                std::cout << "  M_22 (Thigh): " << M(1,1) << "\n";
+                std::cout << "  M_33 (Calf):  " << M(2,2) << "\n";
+
+            } catch (const std::exception& e) {
+                std::cout << "\n[!] PINOCCHIO VALIDATION FAILED: " << e.what() << "\n";
+            }
+            std::cout << "===============================================================\n";
         }
     }
 };
